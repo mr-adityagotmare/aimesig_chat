@@ -16,6 +16,11 @@ class ChatProvider extends ChangeNotifier {
     return _messages[peer] ?? [];
   }
 
+  int get totalUnread => _messages.values
+      .expand((msgs) => msgs)
+      .where((m) => !m.mine && !m.read)
+      .length;
+
   int unreadCount(String peer) {
     return _messages[peer]
             ?.where(
