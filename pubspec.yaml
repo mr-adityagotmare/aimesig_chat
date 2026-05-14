@@ -1,4 +1,4 @@
-name: aimesig_chat
+name: Aimapp
 description: "A new Flutter project."
 publish_to: 'none'
 version: 1.0.0+1
@@ -9,6 +9,9 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+
+  
+  flutter_launcher_icons: ^0.14.3
 
   # State management
   provider: ^6.1.2
@@ -33,6 +36,30 @@ dependencies:
 
   # Permissions (mobile only — safe to include on desktop, just unused)
   permission_handler: ^11.3.1
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon/app_icon.png"
+
+  web:
+    generate: true
+    image_path: "assets/icon/app_icon.png"
+    background_color: "#ffffff"
+    theme_color: "#ffffff"
+
+  windows:
+    generate: true
+    image_path: "assets/icon/app_icon.png"
+    icon_size: 256
+
+  macos:
+    generate: true
+    image_path: "assets/icon/app_icon.png"
+
+  linux:
+    generate: true
+    image_path: "assets/icon/app_icon.png"
 
 dev_dependencies:
   flutter_test:
