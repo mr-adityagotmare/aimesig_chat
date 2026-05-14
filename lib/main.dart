@@ -8,9 +8,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'core/database/database_helper.dart';
 import 'core/network/lan_discovery_service.dart';
 import 'core/network/udp_chat_service.dart';
+import 'core/network/file_transfer_service.dart';
 import 'core/services/message_queue_service.dart';
-import 'models/peer.dart';
 import 'models/chat_message.dart';
+import 'models/peer.dart';
 import 'providers/peer_provider.dart';
 import 'providers/chat_provider.dart';
 import 'providers/theme_provider.dart';
@@ -21,11 +22,8 @@ import 'utils/device_id.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  // Must be called before any DB access on Linux/Windows.
   DatabaseHelper.initFfiIfNeeded();
 
-  // Orientation lock is mobile-only — crashes on Linux/Windows.
   if (Platform.isAndroid || Platform.isIOS) {
     await SystemChrome.setPreferredOrientations([
       DeviceOrientation.portraitUp,
@@ -70,6 +68,7 @@ class AppRoot extends StatefulWidget {
 class _AppRootState extends State<AppRoot> {
   LanDiscoveryService? discovery;
   UdpChatService? udp;
+  FileTransferService? fileTransfer;
   String username = '';
   String deviceId = '';
   MessageQueueService? _messageQueue;
@@ -110,78 +109,144 @@ class _AppRootState extends State<AppRoot> {
     }
   }
 
-Future<void> startServices() async {
-  final peerProvider = context.read<PeerProvider>();
-  final chatProvider = context.read<ChatProvider>();
+  Future<void> startServices() async {
+    final peerProvider = context.read<PeerProvider>();
+    final chatProvider = context.read<ChatProvider>();
 
-  discovery?.stop();
-  final service = UdpChatService();  // local variable — non-null
-  udp = service;                     // assign field too
-  await service.start();             // use local, not field
+    discovery?.stop();
+    fileTransfer?.dispose();
 
-  service.onMessage = (ip, data) async {
-    final type = data['type'];
+    final service = UdpChatService();
+    udp = service;
+    await service.start();
 
-    if (type == 'MESSAGE') {
-      final sender  = data['sender'];
-      final message = data['message'];
-      final msgId   = data['id'];
+    final ft = FileTransferService(service);
+    fileTransfer = ft;
 
+    // Wire up incoming file progress → ChatProvider
+    ft.onReceiveProgress = (id, fileName, received, total, state, {savedPath}) {
+      final progress = total > 0 ? received / total : 0.0;
+      switch (state) {
+        case RecvState.receiving:
+          chatProvider.updateTransferProgress(id, progress);
+          break;
+        case RecvState.complete:
+          if (savedPath != null) {
+            chatProvider.updateFilePath(id, savedPath);
+          }
+          break;
+        case RecvState.failed:
+          chatProvider.markTransferFailed(id);
+          break;
+        default:
+          break;
+      }
+    };
+
+    // Ask user before accepting file (auto-accept for now; swap in a dialog if needed)
+    ft.onIncomingOffer = (id, peerIp, fileName, fileSize) async {
+      // Add a placeholder message immediately so the user can see the incoming transfer
+      final peer = peerProvider.peers
+          .where((p) => p.ip == peerIp)
+          .firstOrNull;
+      final senderName = peer?.name ?? peerIp;
+
+      final isImg = _isImageName(fileName);
       await chatProvider.addMessage(
-        sender,
+        senderName,
         ChatMessage(
-          id: msgId,
-          sender: sender,
+          id: id,
+          sender: senderName,
           receiver: username,
-          message: message,
-          timestamp: data['timestamp'],
+          message: fileName,
+          timestamp: DateTime.now().millisecondsSinceEpoch,
           mine: false,
-          delivered: true,
-          read: false,
+          type: isImg ? MessageType.image : MessageType.file,
+          fileName: fileName,
+          fileSize: fileSize,
+          transferProgress: 0.0,
         ),
       );
+      return true; // auto-accept
+    };
 
-      service.sendMessage(ip: ip, data: {'type': 'DELIVERED', 'id': msgId});
+    service.onMessage = (ip, data) async {
+      final type = data['type'] as String?;
 
-      if (chatProvider.currentOpenChat == sender) {
-        await chatProvider.markRead(msgId);
-        service.sendMessage(ip: ip, data: {'type': 'READ', 'id': msgId});
+      // Route file-transfer packets to FileTransferService
+      if (type != null && type.startsWith('FILE_')) {
+        ft.handleMessage(ip, data);
+        return;
       }
-    } else if (type == 'DELIVERED') {
-      await chatProvider.markDelivered(data['id']);
-    } else if (type == 'READ') {
-      await chatProvider.markRead(data['id']);
-    }
-  };
 
-  discovery = LanDiscoveryService(deviceId: deviceId, username: username);
-  discovery!.onPeerFound = (peerData) {
-    peerProvider.updatePeer(Peer(
-      deviceId: peerData['deviceId'],
-      name: peerData['name'],
-      ip: peerData['ip'],
-      port: peerData['port'],
-      online: true,
-      lastSeen: DateTime.now(),
-    ));
-  };
+      if (type == 'MESSAGE') {
+        final sender  = data['sender'] as String;
+        final message = data['message'] as String;
+        final msgId   = data['id'] as String;
 
-  await discovery!.start();
+        await chatProvider.addMessage(
+          sender,
+          ChatMessage(
+            id: msgId,
+            sender: sender,
+            receiver: username,
+            message: message,
+            timestamp: data['timestamp'],
+            mine: false,
+            delivered: true,
+            read: false,
+          ),
+        );
 
-  _messageQueue?.stop();
-  _messageQueue = MessageQueueService(
-    chatProvider: chatProvider,
-    peerProvider: peerProvider,
-    udp: service,   // pass local, not field
-    myName: username,
-  );
-  _messageQueue!.start();
-}
+        service.sendMessage(ip: ip, data: {'type': 'DELIVERED', 'id': msgId});
+
+        if (chatProvider.currentOpenChat == sender) {
+          await chatProvider.markRead(msgId);
+          service.sendMessage(ip: ip, data: {'type': 'READ', 'id': msgId});
+        }
+      } else if (type == 'DELIVERED') {
+        await chatProvider.markDelivered(data['id']);
+      } else if (type == 'READ') {
+        await chatProvider.markRead(data['id']);
+      }
+    };
+
+    discovery = LanDiscoveryService(deviceId: deviceId, username: username);
+    discovery!.onPeerFound = (peerData) {
+      peerProvider.updatePeer(Peer(
+        deviceId: peerData['deviceId'],
+        name: peerData['name'],
+        ip: peerData['ip'],
+        port: peerData['port'],
+        online: true,
+        lastSeen: DateTime.now(),
+      ));
+    };
+    await discovery!.start();
+
+    _messageQueue?.stop();
+    _messageQueue = MessageQueueService(
+      chatProvider: chatProvider,
+      peerProvider: peerProvider,
+      udp: service,
+      myName: username,
+    );
+    _messageQueue!.start();
+  }
+
+  bool _isImageName(String name) {
+    final lower = name.toLowerCase();
+    return lower.endsWith('.jpg') ||
+        lower.endsWith('.jpeg') ||
+        lower.endsWith('.png') ||
+        lower.endsWith('.gif') ||
+        lower.endsWith('.webp');
+  }
 
   Future<void> onNameSet(String name) async {
     try {
       deviceId = await DeviceId.generate(name);
-      username = name;  // ✅ set BEFORE startServices() reads it
+      username = name;
       await context.read<ChatProvider>().loadMessages();
       await startServices();
       setState(() {
@@ -193,22 +258,23 @@ Future<void> startServices() async {
     }
   }
 
-Future<void> changeName(String newName) async {
-  try {
-    deviceId = await DeviceId.generate(newName);
-    username = newName;  // ✅ set BEFORE startServices()
-    await startServices();
-    setState(() {});     // just trigger a rebuild
-  } catch (e) {
-    print('changeName ERROR => $e');
+  Future<void> changeName(String newName) async {
+    try {
+      deviceId = await DeviceId.generate(newName);
+      username = newName;
+      await startServices();
+      setState(() {});
+    } catch (e) {
+      print('changeName ERROR => $e');
+    }
   }
-}
 
   @override
   void dispose() {
     discovery?.stop();
     _messageQueue?.stop();
-    udp?.stop();   // was: udp.stop()
+    udp?.stop();
+    fileTransfer?.dispose();
     super.dispose();
   }
 
@@ -228,38 +294,26 @@ Future<void> changeName(String newName) async {
                   color: AppColors.accentGreen.withOpacity(0.15),
                   borderRadius: BorderRadius.circular(22),
                 ),
-                child: const Icon(
-                  Icons.wifi_rounded,
-                  color: AppColors.accentGreen,
-                  size: 36,
-                ),
+                child: const Icon(Icons.wifi_rounded,
+                    color: AppColors.accentGreen, size: 36),
               ),
               const SizedBox(height: 20),
-              const Text(
-                'Aimesig',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 26,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: -0.5,
-                ),
-              ),
+              const Text('Aimesig',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 26,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: -0.5)),
               const SizedBox(height: 8),
-              Text(
-                'Starting up...',
-                style: TextStyle(
-                  color: AppColors.textSecondary(true),
-                  fontSize: 14,
-                ),
-              ),
+              Text('Starting up...',
+                  style: TextStyle(
+                      color: AppColors.textSecondary(true), fontSize: 14)),
               const SizedBox(height: 32),
               const SizedBox(
                 width: 28,
                 height: 28,
                 child: CircularProgressIndicator(
-                  strokeWidth: 2.5,
-                  color: AppColors.accentGreen,
-                ),
+                    strokeWidth: 2.5, color: AppColors.accentGreen),
               ),
             ],
           ),
@@ -290,7 +344,10 @@ Future<void> changeName(String newName) async {
                 const SizedBox(height: 24),
                 TextButton(
                   onPressed: () {
-                    setState(() { ready = false; _initError = null; });
+                    setState(() {
+                      ready = false;
+                      _initError = null;
+                    });
                     init();
                   },
                   child: const Text('Retry',
@@ -308,7 +365,8 @@ Future<void> changeName(String newName) async {
     }
 
     return HomeScreen(
-      udp: udp!,       // was: udp
+      udp: udp!,
+      fileTransfer: fileTransfer!,
       username: username,
       onNameChanged: changeName,
     );

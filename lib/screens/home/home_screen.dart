@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/network/udp_chat_service.dart';
+import '../../core/network/file_transfer_service.dart';
 import '../../models/peer.dart';
 import '../../providers/theme_provider.dart';
 import '../../providers/chat_provider.dart';
@@ -14,12 +15,14 @@ import '../settings/settings_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   final UdpChatService udp;
+  final FileTransferService fileTransfer;
   final String username;
   final Function(String) onNameChanged;
 
   const HomeScreen({
     super.key,
     required this.udp,
+    required this.fileTransfer,
     required this.username,
     required this.onNameChanged,
   });
@@ -181,10 +184,10 @@ class _HomeScreenState extends State<HomeScreen>
             child: IndexedStack(
               index: _tab,
               children: [
-                NearbyDevicesScreen(udp: widget.udp, myName: widget.username),
+                NearbyDevicesScreen(udp: widget.udp, fileTransfer: widget.fileTransfer, myName: widget.username),
                 // Pass udp + myName down via the stateful wrapper so the
                 // private _ChatsTab can open ChatScreen without a helper method.
-                _ChatsTabWrapper(udp: widget.udp, myName: widget.username),
+                _ChatsTabWrapper(udp: widget.udp, fileTransfer: widget.fileTransfer, myName: widget.username),
               ],
             ),
           ),
@@ -199,9 +202,10 @@ class _HomeScreenState extends State<HomeScreen>
 // ChatScreen (imported above) inside the builder lambda without issues.
 class _ChatsTabWrapper extends StatelessWidget {
   final UdpChatService udp;
+  final FileTransferService fileTransfer;
   final String myName;
 
-  const _ChatsTabWrapper({required this.udp, required this.myName});
+  const _ChatsTabWrapper({required this.udp, required this.fileTransfer, required this.myName});
 
   @override
   Widget build(BuildContext context) {
@@ -298,6 +302,7 @@ class _ChatsTabWrapper extends StatelessWidget {
                 builder: (_) => ChatScreen(
                   peer: target,
                   udp: udp,
+                  fileTransfer: fileTransfer,
                   myName: myName,
                 ),
               ),

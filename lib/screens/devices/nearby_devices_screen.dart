@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/network/udp_chat_service.dart';
+import '../../core/network/file_transfer_service.dart';
 import '../../models/peer.dart';
 import '../../providers/peer_provider.dart';
 import '../../providers/chat_provider.dart';
@@ -11,11 +12,13 @@ import '../chat/chat_screen.dart';
 
 class NearbyDevicesScreen extends StatefulWidget {
   final UdpChatService udp;
+  final FileTransferService fileTransfer;
   final String myName;
 
   const NearbyDevicesScreen({
     super.key,
     required this.udp,
+    required this.fileTransfer,
     required this.myName,
   });
 
@@ -79,6 +82,7 @@ class _NearbyDevicesScreenState extends State<NearbyDevicesScreen>
                     accent: accent,
                     myName: widget.myName,
                     udp: widget.udp,
+                    fileTransfer: widget.fileTransfer,
                   )),
             ],
             if (offline.isNotEmpty) ...[
@@ -96,6 +100,7 @@ class _NearbyDevicesScreenState extends State<NearbyDevicesScreen>
                     accent: accent,
                     myName: widget.myName,
                     udp: widget.udp,
+                    fileTransfer: widget.fileTransfer,
                   )),
             ],
           ],
@@ -256,6 +261,7 @@ class _DeviceCard extends StatelessWidget {
   final Color accent;
   final String myName;
   final UdpChatService udp;
+  final FileTransferService fileTransfer;
 
   const _DeviceCard({
     required this.peer,
@@ -263,6 +269,7 @@ class _DeviceCard extends StatelessWidget {
     required this.accent,
     required this.myName,
     required this.udp,
+    required this.fileTransfer,
   });
 
   @override
@@ -282,6 +289,7 @@ class _DeviceCard extends StatelessWidget {
                   builder: (_) => ChatScreen(
                     peer: peer,
                     udp: udp,
+                    fileTransfer: fileTransfer,
                     myName: myName,
                   ),
                 ),

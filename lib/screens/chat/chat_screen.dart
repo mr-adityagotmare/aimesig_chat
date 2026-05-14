@@ -1,10 +1,15 @@
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:open_filex/open_filex.dart';
 import 'package:provider/provider.dart';
 
+import '../../core/network/file_transfer_service.dart';
 import '../../core/network/udp_chat_service.dart';
-import '../../models/peer.dart';
 import '../../models/chat_message.dart';
+import '../../models/peer.dart';
 import '../../providers/chat_provider.dart';
 import '../../providers/theme_provider.dart';
 import '../../theme/app_theme.dart';
@@ -12,12 +17,14 @@ import '../../theme/app_theme.dart';
 class ChatScreen extends StatefulWidget {
   final Peer peer;
   final UdpChatService udp;
+  final FileTransferService fileTransfer;
   final String myName;
 
   const ChatScreen({
     super.key,
     required this.peer,
     required this.udp,
+    required this.fileTransfer,
     required this.myName,
   });
 
@@ -33,9 +40,8 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
-    _controller.addListener(() {
-      setState(() => _showSendButton = _controller.text.trim().isNotEmpty);
-    });
+    _controller.addListener(
+        () => setState(() => _showSendButton = _controller.text.trim().isNotEmpty));
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       final provider = context.read<ChatProvider>();
@@ -61,21 +67,20 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _scrollToBottom({bool animated = false}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        if (animated) {
-          _scrollController.animateTo(
-            _scrollController.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeOut,
-          );
-        } else {
-          _scrollController.jumpTo(
-            _scrollController.position.maxScrollExtent,
-          );
-        }
+      if (!_scrollController.hasClients) return;
+      if (animated) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      } else {
+        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
       }
     });
   }
+
+  // ── Send text ────────────────────────────────────────────────────────────────
 
   void _sendMessage() async {
     final text = _controller.text.trim();
@@ -98,7 +103,6 @@ class _ChatScreenState extends State<ChatScreen> {
     );
 
     await provider.addMessage(widget.peer.name, msg);
-
     widget.udp.sendMessage(ip: widget.peer.ip, data: {
       'type': 'MESSAGE',
       'id': msgId,
@@ -109,6 +113,115 @@ class _ChatScreenState extends State<ChatScreen> {
 
     _scrollToBottom(animated: true);
   }
+
+  // ── Send file ────────────────────────────────────────────────────────────────
+
+  Future<void> _pickAndSendFile() async {
+    if (!widget.peer.online) {
+      _showSnack('Peer is offline');
+      return;
+    }
+
+    final result = await FilePicker.platform.pickFiles(allowMultiple: false);
+    if (result == null || result.files.isEmpty) return;
+
+    final picked = result.files.first;
+    if (picked.path == null) return;
+
+    HapticFeedback.mediumImpact();
+
+    final provider = context.read<ChatProvider>();
+    final msgId = DateTime.now().millisecondsSinceEpoch.toString();
+    final filePath = picked.path!;
+    final fileName = picked.name;
+    final fileSize = picked.size;
+    final isImg = _isImageName(fileName);
+
+    // Add a placeholder message immediately
+    final msg = ChatMessage(
+      id: msgId,
+      sender: widget.myName,
+      receiver: widget.peer.name,
+      message: fileName,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      mine: true,
+      type: isImg ? MessageType.image : MessageType.file,
+      filePath: filePath,
+      fileName: fileName,
+      fileSize: fileSize,
+      transferProgress: 0.0,
+    );
+
+    await provider.addMessage(widget.peer.name, msg);
+    _scrollToBottom(animated: true);
+
+    // Wire up send progress
+    widget.fileTransfer.sendFile(
+      peerIp: widget.peer.ip,
+      filePath: filePath,
+      onProgress: (id, sent, total, state) {
+        final progress = total > 0 ? sent / total : 0.0;
+        if (state == SendState.done) {
+          provider.markDelivered(msgId);
+          provider.updateTransferProgress(msgId, 1.0);
+        } else if (state == SendState.failed) {
+          provider.markTransferFailed(msgId);
+        } else {
+          provider.updateTransferProgress(msgId, progress);
+        }
+      },
+    );
+  }
+
+  // ── Retry failed send ────────────────────────────────────────────────────────
+
+  void _retryFileSend(ChatMessage msg) {
+    if (!widget.peer.online) {
+      _showSnack('Peer is offline — cannot retry yet');
+      return;
+    }
+    if (msg.filePath == null || !File(msg.filePath!).existsSync()) {
+      _showSnack('Original file no longer exists');
+      return;
+    }
+
+    final provider = context.read<ChatProvider>();
+
+    // Reset failure flag and progress so the bubble switches back to "Sending"
+    provider.resetTransferFailed(msg.id);
+
+    widget.fileTransfer.sendFile(
+      peerIp: widget.peer.ip,
+      filePath: msg.filePath!,
+      onProgress: (id, sent, total, state) {
+        final progress = total > 0 ? sent / total : 0.0;
+        if (state == SendState.done) {
+          provider.markDelivered(msg.id);
+          provider.updateTransferProgress(msg.id, 1.0);
+        } else if (state == SendState.failed) {
+          provider.markTransferFailed(msg.id);
+        } else {
+          provider.updateTransferProgress(msg.id, progress);
+        }
+      },
+    );
+  }
+
+  bool _isImageName(String name) {
+    final lower = name.toLowerCase();
+    return lower.endsWith('.jpg') ||
+        lower.endsWith('.jpeg') ||
+        lower.endsWith('.png') ||
+        lower.endsWith('.gif') ||
+        lower.endsWith('.webp');
+  }
+
+  void _showSnack(String msg) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(msg), duration: const Duration(seconds: 2)));
+  }
+
+  // ── Helpers ──────────────────────────────────────────────────────────────────
 
   String _formatTime(int ts) {
     final t = DateTime.fromMillisecondsSinceEpoch(ts);
@@ -122,9 +235,8 @@ class _ChatScreenState extends State<ChatScreen> {
       return 'Today';
     } else if (now.difference(dt).inDays == 1) {
       return 'Yesterday';
-    } else {
-      return '${dt.day} ${_monthName(dt.month)} ${dt.year}';
     }
+    return '${dt.day} ${_monthName(dt.month)} ${dt.year}';
   }
 
   String _monthName(int m) {
@@ -144,6 +256,8 @@ class _ChatScreenState extends State<ChatScreen> {
         curr.year != prev.year;
   }
 
+  // ── Build ────────────────────────────────────────────────────────────────────
+
   @override
   Widget build(BuildContext context) {
     final themeProvider = context.watch<ThemeProvider>();
@@ -154,12 +268,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
     final msgs = context.watch<ChatProvider>().getMessages(widget.peer.name);
 
-    // Auto scroll on new message
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
         final max = _scrollController.position.maxScrollExtent;
-        final current = _scrollController.offset;
-        if (max - current < 200) {
+        if (max - _scrollController.offset < 200) {
           _scrollController.jumpTo(max);
         }
       }
@@ -170,7 +282,6 @@ class _ChatScreenState extends State<ChatScreen> {
       appBar: _buildAppBar(isDark, accent),
       body: Column(
         children: [
-          // Messages list
           Expanded(
             child: msgs.isEmpty
                 ? _buildEmptyChat(isDark, accent)
@@ -181,29 +292,38 @@ class _ChatScreenState extends State<ChatScreen> {
                     itemCount: msgs.length,
                     itemBuilder: (context, index) {
                       final msg = msgs[index];
-                      final showDate = _isNewDay(msgs, index);
-
                       return Column(
                         children: [
-                          if (showDate) _DateDivider(
-                            label: _formatDateHeader(msg.timestamp),
-                            isDark: isDark,
-                          ),
-                          _ChatBubble(
-                            msg: msg,
-                            isDark: isDark,
-                            accent: accent,
-                            fontSize: fontSize,
-                            showTimestamp: showTimestamps,
-                            formatTime: _formatTime,
-                          ),
+                          if (_isNewDay(msgs, index))
+                            _DateDivider(
+                              label: _formatDateHeader(msg.timestamp),
+                              isDark: isDark,
+                            ),
+                          if (msg.isFile)
+                            _FileBubble(
+                              msg: msg,
+                              isDark: isDark,
+                              accent: accent,
+                              showTimestamp: showTimestamps,
+                              formatTime: _formatTime,
+                              onRetry: msg.transferFailed && msg.mine
+                                  ? () => _retryFileSend(msg)
+                                  : null,
+                            )
+                          else
+                            _ChatBubble(
+                              msg: msg,
+                              isDark: isDark,
+                              accent: accent,
+                              fontSize: fontSize,
+                              showTimestamp: showTimestamps,
+                              formatTime: _formatTime,
+                            ),
                         ],
                       );
                     },
                   ),
           ),
-
-          // Input area
           _buildInputBar(isDark, accent),
         ],
       ),
@@ -216,11 +336,8 @@ class _ChatScreenState extends State<ChatScreen> {
       elevation: 0,
       titleSpacing: 0,
       leading: IconButton(
-        icon: Icon(
-          Icons.arrow_back_ios_new_rounded,
-          size: 18,
-          color: AppColors.textPrimary(isDark),
-        ),
+        icon: Icon(Icons.arrow_back_ios_new_rounded,
+            size: 18, color: AppColors.textPrimary(isDark)),
         onPressed: () => Navigator.pop(context),
       ),
       title: Row(
@@ -243,10 +360,9 @@ class _ChatScreenState extends State<ChatScreen> {
                   child: Text(
                     widget.peer.name[0].toUpperCase(),
                     style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w800,
-                      fontSize: 16,
-                    ),
+                        color: Colors.white,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 16),
                   ),
                 ),
               ),
@@ -261,9 +377,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       color: AppColors.accentGreen,
                       shape: BoxShape.circle,
                       border: Border.all(
-                        color: isDark
-                            ? AppColors.darkSurface
-                            : Colors.white,
+                        color: isDark ? AppColors.darkSurface : Colors.white,
                         width: 2,
                       ),
                     ),
@@ -275,17 +389,16 @@ class _ChatScreenState extends State<ChatScreen> {
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              Text(widget.peer.name,
+                  style: TextStyle(
+                      color: AppColors.textPrimary(isDark),
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: -0.3)),
               Text(
-                widget.peer.name,
-                style: TextStyle(
-                  color: AppColors.textPrimary(isDark),
-                  fontSize: 16,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: -0.3,
-                ),
-              ),
-              Text(
-                widget.peer.online ? 'online · ${widget.peer.ip}' : 'offline',
+                widget.peer.online
+                    ? 'online · ${widget.peer.ip}'
+                    : 'offline',
                 style: TextStyle(
                   color: widget.peer.online
                       ? AppColors.accentGreen
@@ -300,10 +413,8 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
       actions: [
         PopupMenuButton<String>(
-          icon: Icon(
-            Icons.more_vert_rounded,
-            color: AppColors.textSecondary(isDark),
-          ),
+          icon: Icon(Icons.more_vert_rounded,
+              color: AppColors.textSecondary(isDark)),
           color: isDark ? AppColors.darkCard : Colors.white,
           shape:
               RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -314,9 +425,8 @@ class _ChatScreenState extends State<ChatScreen> {
                   context, 'Clear chat', 'All messages will be deleted.');
               if (confirmed == true) await provider.clearChat(widget.peer.name);
             } else if (value == 'delete') {
-              final confirmed = await _confirmDialog(
-                  context, 'Delete conversation',
-                  'This conversation will be removed.');
+              final confirmed = await _confirmDialog(context,
+                  'Delete conversation', 'This conversation will be removed.');
               if (confirmed == true) {
                 await provider.deleteChat(widget.peer.name);
                 if (mounted) Navigator.pop(context);
@@ -326,29 +436,23 @@ class _ChatScreenState extends State<ChatScreen> {
           itemBuilder: (context) => [
             PopupMenuItem(
               value: 'clear',
-              child: Row(
-                children: [
-                  Icon(Icons.cleaning_services_outlined,
-                      size: 18,
-                      color: AppColors.textSecondary(isDark)),
-                  const SizedBox(width: 10),
-                  Text('Clear chat',
-                      style:
-                          TextStyle(color: AppColors.textPrimary(isDark))),
-                ],
-              ),
+              child: Row(children: [
+                Icon(Icons.cleaning_services_outlined,
+                    size: 18, color: AppColors.textSecondary(isDark)),
+                const SizedBox(width: 10),
+                Text('Clear chat',
+                    style: TextStyle(color: AppColors.textPrimary(isDark))),
+              ]),
             ),
             PopupMenuItem(
               value: 'delete',
-              child: Row(
-                children: [
-                  const Icon(Icons.delete_outline_rounded,
-                      size: 18, color: Colors.red),
-                  const SizedBox(width: 10),
-                  const Text('Delete conversation',
-                      style: TextStyle(color: Colors.red)),
-                ],
-              ),
+              child: Row(children: [
+                const Icon(Icons.delete_outline_rounded,
+                    size: 18, color: Colors.red),
+                const SizedBox(width: 10),
+                const Text('Delete conversation',
+                    style: TextStyle(color: Colors.red)),
+              ]),
             ),
           ],
         ),
@@ -362,10 +466,9 @@ class _ChatScreenState extends State<ChatScreen> {
     return showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
-        backgroundColor:
-            isDark ? AppColors.darkCard : Colors.white,
-        shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(18)),
+        backgroundColor: isDark ? AppColors.darkCard : Colors.white,
+        shape:
+            RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
         title: Text(title,
             style: TextStyle(
                 color: AppColors.textPrimary(isDark),
@@ -376,13 +479,12 @@ class _ChatScreenState extends State<ChatScreen> {
           TextButton(
             onPressed: () => Navigator.pop(context, false),
             child: Text('Cancel',
-                style: TextStyle(
-                    color: AppColors.textSecondary(isDark))),
+                style: TextStyle(color: AppColors.textSecondary(isDark))),
           ),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Confirm',
-                style: TextStyle(color: Colors.red)),
+            child:
+                const Text('Confirm', style: TextStyle(color: Colors.red)),
           ),
         ],
       ),
@@ -401,26 +503,19 @@ class _ChatScreenState extends State<ChatScreen> {
               color: accent.withOpacity(0.1),
               borderRadius: BorderRadius.circular(20),
             ),
-            child: Icon(Icons.waving_hand_rounded,
-                color: accent, size: 30),
+            child:
+                Icon(Icons.waving_hand_rounded, color: accent, size: 30),
           ),
           const SizedBox(height: 16),
-          Text(
-            'Say hello to ${widget.peer.name}!',
-            style: TextStyle(
-              color: AppColors.textPrimary(isDark),
-              fontSize: 16,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
+          Text('Say hello to ${widget.peer.name}!',
+              style: TextStyle(
+                  color: AppColors.textPrimary(isDark),
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600)),
           const SizedBox(height: 6),
-          Text(
-            'Messages are sent over your local network',
-            style: TextStyle(
-              color: AppColors.textSecondary(isDark),
-              fontSize: 13,
-            ),
-          ),
+          Text('Messages are sent over your local network',
+              style: TextStyle(
+                  color: AppColors.textSecondary(isDark), fontSize: 13)),
         ],
       ),
     );
@@ -436,17 +531,42 @@ class _ChatScreenState extends State<ChatScreen> {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
+              // Attach button
+              GestureDetector(
+                onTap: _pickAndSendFile,
+                child: Container(
+                  width: 44,
+                  height: 44,
+                  margin: const EdgeInsets.only(right: 8),
+                  decoration: BoxDecoration(
+                    color: isDark ? AppColors.darkCard : AppColors.lightBg,
+                    borderRadius: BorderRadius.circular(22),
+                    border: Border.all(
+                      color: isDark
+                          ? AppColors.darkBorder
+                          : AppColors.lightBorder,
+                    ),
+                  ),
+                  child: Icon(Icons.attach_file_rounded,
+                      size: 20,
+                      color: widget.peer.online
+                          ? accent
+                          : AppColors.textMuted(isDark)),
+                ),
+              ),
+
+              // Text field
               Expanded(
                 child: Container(
                   constraints: const BoxConstraints(maxHeight: 120),
                   decoration: BoxDecoration(
-                    color: isDark
-                        ? AppColors.darkCard
-                        : AppColors.lightBg,
+                    color:
+                        isDark ? AppColors.darkCard : AppColors.lightBg,
                     borderRadius: BorderRadius.circular(24),
                     border: Border.all(
-                      color:
-                          isDark ? AppColors.darkBorder : AppColors.lightBorder,
+                      color: isDark
+                          ? AppColors.darkBorder
+                          : AppColors.lightBorder,
                       width: 1,
                     ),
                   ),
@@ -455,9 +575,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     maxLines: null,
                     textCapitalization: TextCapitalization.sentences,
                     style: TextStyle(
-                      color: AppColors.textPrimary(isDark),
-                      fontSize: 15,
-                    ),
+                        color: AppColors.textPrimary(isDark), fontSize: 15),
                     decoration: InputDecoration(
                       hintText: 'Message ${widget.peer.name}...',
                       hintStyle:
@@ -471,33 +589,28 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
               const SizedBox(width: 8),
-              AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                curve: Curves.easeOutBack,
-                width: _showSendButton ? 48 : 48,
-                height: 48,
-                child: GestureDetector(
-                  onTap: _sendMessage,
-                  child: Container(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: _showSendButton
-                            ? [accent, accent.withOpacity(0.7)]
-                            : [
-                                AppColors.textMuted(isDark),
-                                AppColors.textMuted(isDark),
-                              ],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                      ),
-                      shape: BoxShape.circle,
+
+              // Send button
+              GestureDetector(
+                onTap: _sendMessage,
+                child: Container(
+                  width: 48,
+                  height: 48,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: _showSendButton
+                          ? [accent, accent.withOpacity(0.7)]
+                          : [
+                              AppColors.textMuted(isDark),
+                              AppColors.textMuted(isDark),
+                            ],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
                     ),
-                    child: const Icon(
-                      Icons.send_rounded,
-                      color: Colors.white,
-                      size: 20,
-                    ),
+                    shape: BoxShape.circle,
                   ),
+                  child: const Icon(Icons.send_rounded,
+                      color: Colors.white, size: 20),
                 ),
               ),
             ],
@@ -508,47 +621,304 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 }
 
-class _DateDivider extends StatelessWidget {
-  final String label;
-  final bool isDark;
+// ── File Bubble ───────────────────────────────────────────────────────────────
 
-  const _DateDivider({required this.label, required this.isDark});
+class _FileBubble extends StatelessWidget {
+  final ChatMessage msg;
+  final bool isDark;
+  final Color accent;
+  final bool showTimestamp;
+  final String Function(int) formatTime;
+  final VoidCallback? onRetry;
+
+  const _FileBubble({
+    required this.msg,
+    required this.isDark,
+    required this.accent,
+    required this.showTimestamp,
+    required this.formatTime,
+    this.onRetry,
+  });
+
+  String _formatSize(int? bytes) {
+    if (bytes == null) return '';
+    if (bytes < 1024) return '${bytes}B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+
+  // Derive a human-readable status label + colour from message state.
+  _StatusInfo _status(bool hasFile, bool inProgress) {
+    if (msg.transferFailed) {
+      return _StatusInfo(
+        label: msg.mine ? 'Failed · tap to retry' : 'Transfer failed',
+        color: Colors.red,
+        icon: Icons.error_outline_rounded,
+        iconColor: Colors.red,
+      );
+    }
+    if (hasFile) {
+      return _StatusInfo(
+        label: _formatSize(msg.fileSize),
+        color: null, // use textMuted
+        icon: msg.isImage ? Icons.image_rounded : Icons.insert_drive_file_rounded,
+        iconColor: null, // use accent
+      );
+    }
+    if (inProgress) {
+      final pct = (msg.transferProgress * 100).toStringAsFixed(0);
+      final label = msg.mine
+          ? (msg.transferProgress == 0 ? 'Waiting…' : 'Sending $pct%')
+          : 'Receiving $pct%';
+      return _StatusInfo(
+        label: label,
+        color: null,
+        icon: Icons.hourglass_top_rounded,
+        iconColor: null,
+      );
+    }
+    // Stuck at 0 before offer accepted
+    return _StatusInfo(
+      label: msg.mine ? 'Offering…' : 'Incoming…',
+      color: null,
+      icon: Icons.upload_rounded,
+      iconColor: null,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 14),
-      child: Row(
-        children: [
-          Expanded(
-              child: Divider(
-                  color: AppColors.darkBorder.withOpacity(0.5), thickness: 0.5)),
-          const SizedBox(width: 10),
-          Container(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-            decoration: BoxDecoration(
-              color: AppColors.darkCard.withOpacity(0.6),
-              borderRadius: BorderRadius.circular(12),
+    final isImg = msg.isImage;
+    final hasFile = msg.filePath != null && File(msg.filePath!).existsSync();
+    final inProgress = !msg.transferFailed &&
+        msg.transferProgress < 1.0 &&
+        !hasFile;
+
+    final status = _status(hasFile, inProgress);
+
+    return Align(
+      alignment: msg.mine ? Alignment.centerRight : Alignment.centerLeft,
+      child: GestureDetector(
+        onTap: () {
+          if (hasFile) {
+            OpenFilex.open(msg.filePath!);
+          } else if (msg.transferFailed && msg.mine) {
+            onRetry?.call();
+          }
+        },
+        child: Container(
+          margin: EdgeInsets.only(
+            top: 2,
+            bottom: 2,
+            left: msg.mine ? 60 : 0,
+            right: msg.mine ? 0 : 60,
+          ),
+          decoration: BoxDecoration(
+            color: msg.mine
+                ? accent.withOpacity(isDark ? 0.22 : 0.15)
+                : (isDark ? AppColors.darkCard : Colors.white),
+            borderRadius: BorderRadius.only(
+              topLeft: const Radius.circular(18),
+              topRight: const Radius.circular(18),
+              bottomLeft: Radius.circular(msg.mine ? 18 : 4),
+              bottomRight: Radius.circular(msg.mine ? 4 : 18),
             ),
-            child: Text(
-              label,
-              style: TextStyle(
-                color: AppColors.textSecondary(isDark),
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-              ),
+            border: Border.all(
+              color: msg.transferFailed
+                  ? Colors.red.withOpacity(0.4)
+                  : msg.mine
+                      ? accent.withOpacity(0.2)
+                      : (isDark ? AppColors.darkBorder : AppColors.lightBorder),
+              width: 1,
             ),
           ),
-          const SizedBox(width: 10),
-          Expanded(
-              child: Divider(
-                  color: AppColors.darkBorder.withOpacity(0.5), thickness: 0.5)),
-        ],
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Image preview
+              if (isImg && hasFile)
+                ClipRRect(
+                  borderRadius: const BorderRadius.vertical(
+                      top: Radius.circular(17)),
+                  child: Image.file(
+                    File(msg.filePath!),
+                    width: 220,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const SizedBox(),
+                  ),
+                ),
+
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // Icon
+                        Container(
+                          width: 36,
+                          height: 36,
+                          decoration: BoxDecoration(
+                            color: msg.transferFailed
+                                ? Colors.red.withOpacity(0.12)
+                                : accent.withOpacity(0.18),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Icon(
+                            status.icon,
+                            color: status.iconColor ?? accent,
+                            size: 18,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+
+                        // Name + status
+                        Flexible(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                msg.fileName ?? msg.message,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: AppColors.textPrimary(isDark),
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                status.label,
+                                style: TextStyle(
+                                  color: status.color ??
+                                      AppColors.textMuted(isDark),
+                                  fontSize: 11,
+                                  fontWeight: msg.transferFailed
+                                      ? FontWeight.w600
+                                      : FontWeight.normal,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+
+                        const SizedBox(width: 8),
+
+                        // Right-side action icon
+                        if (hasFile)
+                          Icon(Icons.open_in_new_rounded,
+                              size: 16, color: AppColors.textMuted(isDark))
+                        else if (msg.transferFailed && msg.mine)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: Colors.red.withOpacity(0.12),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                  color: Colors.red.withOpacity(0.3)),
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.refresh_rounded,
+                                    size: 12, color: Colors.red),
+                                SizedBox(width: 3),
+                                Text('Retry',
+                                    style: TextStyle(
+                                        color: Colors.red,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600)),
+                              ],
+                            ),
+                          )
+                        else if (inProgress && !msg.mine)
+                          // Receiver sees a download spinner
+                          SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: accent,
+                            ),
+                          ),
+                      ],
+                    ),
+
+                    // Progress bar (sender and receiver while transferring)
+                    if (inProgress && msg.transferProgress > 0) ...[
+                      const SizedBox(height: 8),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(4),
+                        child: LinearProgressIndicator(
+                          value: msg.transferProgress,
+                          backgroundColor: accent.withOpacity(0.15),
+                          valueColor: AlwaysStoppedAnimation(accent),
+                          minHeight: 4,
+                        ),
+                      ),
+                    ],
+
+                    // Timestamp + tick
+                    if (showTimestamp) ...[
+                      const SizedBox(height: 6),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            formatTime(msg.timestamp),
+                            style: TextStyle(
+                                color: AppColors.textMuted(isDark),
+                                fontSize: 10),
+                          ),
+                          if (msg.mine) ...[
+                            const SizedBox(width: 4),
+                            Icon(
+                              msg.read
+                                  ? Icons.done_all_rounded
+                                  : msg.delivered
+                                      ? Icons.done_all_rounded
+                                      : Icons.done_rounded,
+                              size: 14,
+                              color: msg.read
+                                  ? accent
+                                  : AppColors.textMuted(isDark),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
 }
+
+// Simple data class for bubble status display
+class _StatusInfo {
+  final String label;
+  final Color? color;
+  final IconData icon;
+  final Color? iconColor;
+  const _StatusInfo({
+    required this.label,
+    required this.color,
+    required this.icon,
+    required this.iconColor,
+  });
+}
+
+// ── Text Bubble ───────────────────────────────────────────────────────────────
 
 class _ChatBubble extends StatelessWidget {
   final ChatMessage msg;
@@ -578,8 +948,7 @@ class _ChatBubble extends StatelessWidget {
           left: msg.mine ? 60 : 0,
           right: msg.mine ? 0 : 60,
         ),
-        padding:
-            const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         decoration: BoxDecoration(
           color: msg.mine
               ? accent.withOpacity(isDark ? 0.22 : 0.15)
@@ -606,10 +975,9 @@ class _ChatBubble extends StatelessWidget {
               child: Text(
                 msg.message,
                 style: TextStyle(
-                  color: AppColors.textPrimary(isDark),
-                  fontSize: fontSize,
-                  height: 1.4,
-                ),
+                    color: AppColors.textPrimary(isDark),
+                    fontSize: fontSize,
+                    height: 1.4),
               ),
             ),
             if (showTimestamp) ...[
@@ -620,9 +988,7 @@ class _ChatBubble extends StatelessWidget {
                   Text(
                     formatTime(msg.timestamp),
                     style: TextStyle(
-                      color: AppColors.textMuted(isDark),
-                      fontSize: 10,
-                    ),
+                        color: AppColors.textMuted(isDark), fontSize: 10),
                   ),
                   if (msg.mine) ...[
                     const SizedBox(width: 4),
@@ -633,9 +999,7 @@ class _ChatBubble extends StatelessWidget {
                               ? Icons.done_all_rounded
                               : Icons.done_rounded,
                       size: 14,
-                      color: msg.read
-                          ? accent
-                          : AppColors.textMuted(isDark),
+                      color: msg.read ? accent : AppColors.textMuted(isDark),
                     ),
                   ],
                 ],
@@ -643,6 +1007,50 @@ class _ChatBubble extends StatelessWidget {
             ],
           ],
         ),
+      ),
+    );
+  }
+}
+
+// ── Date divider ──────────────────────────────────────────────────────────────
+
+class _DateDivider extends StatelessWidget {
+  final String label;
+  final bool isDark;
+  const _DateDivider({required this.label, required this.isDark});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 14),
+      child: Row(
+        children: [
+          Expanded(
+              child: Divider(
+                  color: AppColors.darkBorder.withOpacity(0.5),
+                  thickness: 0.5)),
+          const SizedBox(width: 10),
+          Container(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            decoration: BoxDecoration(
+              color: AppColors.darkCard.withOpacity(0.6),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Text(
+              label,
+              style: TextStyle(
+                  color: AppColors.textSecondary(isDark),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+              child: Divider(
+                  color: AppColors.darkBorder.withOpacity(0.5),
+                  thickness: 0.5)),
+        ],
       ),
     );
   }

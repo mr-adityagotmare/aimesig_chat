@@ -12,6 +12,9 @@ dependencies:
 
   # State management
   provider: ^6.1.2
+  file_picker: ^8.0.0
+  open_filex: ^4.7.0
+  path_provider: ^2.1.0   # already likely present, but confirm
 
   # Database
   sqflite: ^2.3.2
