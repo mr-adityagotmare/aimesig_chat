@@ -3,13 +3,17 @@ import 'package:provider/provider.dart';
 
 import '../../core/network/udp_chat_service.dart';
 import '../../core/network/file_transfer_service.dart';
+import '../../models/group.dart';
 import '../../models/peer.dart';
 import '../../providers/theme_provider.dart';
 import '../../providers/chat_provider.dart';
+import '../../providers/group_provider.dart';
 import '../../providers/peer_provider.dart';
 import '../../theme/app_theme.dart';
 import '../chat/chat_screen.dart';
 import '../devices/nearby_devices_screen.dart';
+import '../group/create_group_screen.dart';
+import '../group/group_chat_screen.dart';
 import '../profile/profile_screen.dart';
 import '../settings/settings_screen.dart';
 
@@ -17,6 +21,7 @@ class HomeScreen extends StatefulWidget {
   final UdpChatService udp;
   final FileTransferService fileTransfer;
   final String username;
+  final String deviceId; // NEW
   final Function(String) onNameChanged;
 
   const HomeScreen({
@@ -24,6 +29,7 @@ class HomeScreen extends StatefulWidget {
     required this.udp,
     required this.fileTransfer,
     required this.username,
+    required this.deviceId, // NEW
     required this.onNameChanged,
   });
 
@@ -142,6 +148,7 @@ class _HomeScreenState extends State<HomeScreen>
             ),
           ),
 
+          // ── Tabs ────────────────────────────────────────────────────────────
           Container(
             color: bg,
             child: Padding(
@@ -166,6 +173,17 @@ class _HomeScreenState extends State<HomeScreen>
                     onTap: () => setState(() => _tab = 1),
                     badge: context.watch<ChatProvider>().totalUnread,
                   ),
+                  const SizedBox(width: 8),
+                  // NEW — Groups tab
+                  _Tab(
+                    label: 'Groups',
+                    icon: Icons.group_outlined,
+                    active: _tab == 2,
+                    accent: accent,
+                    isDark: isDark,
+                    onTap: () => setState(() => _tab = 2),
+                    badge: context.watch<GroupProvider>().totalGroupUnread,
+                  ),
                 ],
               ),
             ),
@@ -184,10 +202,20 @@ class _HomeScreenState extends State<HomeScreen>
             child: IndexedStack(
               index: _tab,
               children: [
-                NearbyDevicesScreen(udp: widget.udp, fileTransfer: widget.fileTransfer, myName: widget.username),
-                // Pass udp + myName down via the stateful wrapper so the
-                // private _ChatsTab can open ChatScreen without a helper method.
-                _ChatsTabWrapper(udp: widget.udp, fileTransfer: widget.fileTransfer, myName: widget.username),
+                NearbyDevicesScreen(
+                    udp: widget.udp,
+                    fileTransfer: widget.fileTransfer,
+                    myName: widget.username),
+                _ChatsTabWrapper(
+                    udp: widget.udp,
+                    fileTransfer: widget.fileTransfer,
+                    myName: widget.username),
+                // NEW — Groups tab content
+                _GroupsTabWrapper(
+                  udp: widget.udp,
+                  myName: widget.username,
+                  myDeviceId: widget.deviceId,
+                ),
               ],
             ),
           ),
@@ -197,15 +225,15 @@ class _HomeScreenState extends State<HomeScreen>
   }
 }
 
-// ── Public wrapper so _ChatsTab can be placed in IndexedStack ────────────────
-// Using a public StatelessWidget here means Flutter's compiler can resolve
-// ChatScreen (imported above) inside the builder lambda without issues.
+// ── Chats Tab ─────────────────────────────────────────────────────────────────
+
 class _ChatsTabWrapper extends StatelessWidget {
   final UdpChatService udp;
   final FileTransferService fileTransfer;
   final String myName;
 
-  const _ChatsTabWrapper({required this.udp, required this.fileTransfer, required this.myName});
+  const _ChatsTabWrapper(
+      {required this.udp, required this.fileTransfer, required this.myName});
 
   @override
   Widget build(BuildContext context) {
@@ -269,12 +297,10 @@ class _ChatsTabWrapper extends StatelessWidget {
         final msgs = entry.value;
         final lastMsg = msgs.isNotEmpty ? msgs.last : null;
         final unread = chatProvider.unreadCount(peerName);
-        final peer = peerProvider.peers
-            .where((p) => p.name == peerName)
-            .firstOrNull;
+        final peer =
+            peerProvider.peers.where((p) => p.name == peerName).firstOrNull;
         final online = peer?.online ?? false;
 
-        // Always allow opening chat — use offline placeholder if peer not found
         final target = peer ??
             Peer(
               deviceId: peerName,
@@ -293,11 +319,11 @@ class _ChatsTabWrapper extends StatelessWidget {
           online: online,
           isDark: isDark,
           accent: accent,
+          isGroup: false,
           onTap: () {
             chatProvider.openChat(peerName);
             Navigator.push(
               context,
-              // Inline ChatScreen directly — avoids private-class resolution bug
               MaterialPageRoute(
                 builder: (_) => ChatScreen(
                   peer: target,
@@ -314,8 +340,148 @@ class _ChatsTabWrapper extends StatelessWidget {
   }
 }
 
-// Keep _ChatsTab as a thin alias so nothing else breaks if referenced elsewhere
 typedef _ChatsTab = _ChatsTabWrapper;
+
+// ── Groups Tab ────────────────────────────────────────────────────────────────
+
+class _GroupsTabWrapper extends StatelessWidget {
+  final UdpChatService udp;
+  final String myName;
+  final String myDeviceId;
+
+  const _GroupsTabWrapper({
+    required this.udp,
+    required this.myName,
+    required this.myDeviceId,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final groupProvider = context.watch<GroupProvider>();
+    final themeProvider = context.watch<ThemeProvider>();
+    final isDark = themeProvider.isDark;
+    final accent = themeProvider.primaryColor;
+
+    final groups = groupProvider.groups
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
+    return Stack(
+      children: [
+        groups.isEmpty
+            ? Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 72,
+                      height: 72,
+                      decoration: BoxDecoration(
+                        color: accent.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(22),
+                      ),
+                      child:
+                          Icon(Icons.group_outlined, color: accent, size: 34),
+                    ),
+                    const SizedBox(height: 16),
+                    Text('No groups yet',
+                        style: TextStyle(
+                          color: AppColors.textPrimary(isDark),
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        )),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Tap + to create a group',
+                      style: TextStyle(
+                          color: AppColors.textSecondary(isDark), fontSize: 13),
+                    ),
+                  ],
+                ),
+              )
+            : ListView.separated(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 80),
+                itemCount: groups.length,
+                separatorBuilder: (_, __) => const SizedBox(height: 4),
+                itemBuilder: (context, i) {
+                  final group = groups[i];
+                  final msgs = groupProvider.getGroupMessages(group.id);
+                  final lastMsg = msgs.isNotEmpty ? msgs.last : null;
+                  final unread = groupProvider.unreadGroupCount(group.id);
+
+                  return _ConversationTile(
+                    peerName: group.name,
+                    lastMessage: lastMsg != null
+                        ? '${lastMsg.sender}: ${lastMsg.message}'
+                        : null,
+                    lastTimestamp: lastMsg?.timestamp,
+                    unreadCount: unread,
+                    online: true,
+                    isDark: isDark,
+                    accent: accent,
+                    isGroup: true,
+                    memberCount: group.memberNames.length,
+                    onTap: () {
+                      groupProvider.openGroup(group.id);
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => GroupChatScreen(
+                            group: group,
+                            udp: udp,
+                            myName: myName,
+                            myDeviceId: myDeviceId,
+                          ),
+                        ),
+                      ).then((_) => groupProvider.closeGroup());
+                    },
+                  );
+                },
+              ),
+
+        // FAB to create group
+        Positioned(
+          bottom: 20,
+          right: 20,
+          child: GestureDetector(
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => CreateGroupScreen(
+                    udp: udp,
+                    myName: myName,
+                    myDeviceId: myDeviceId,
+                  ),
+                ),
+              );
+            },
+            child: Container(
+              width: 56,
+              height: 56,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [accent, accent.withOpacity(0.7)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                      color: accent.withOpacity(0.4),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4)),
+                ],
+              ),
+              child: const Icon(Icons.add_rounded, color: Colors.white, size: 28),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ── Shared Widgets ────────────────────────────────────────────────────────────
 
 class _NetworkBadge extends StatelessWidget {
   final bool isDark;
@@ -422,7 +588,7 @@ class _Tab extends StatelessWidget {
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 180),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
         decoration: BoxDecoration(
           color: active ? accent.withOpacity(0.12) : Colors.transparent,
           borderRadius: BorderRadius.circular(10),
@@ -483,6 +649,8 @@ class _ConversationTile extends StatelessWidget {
   final bool isDark;
   final Color accent;
   final VoidCallback onTap;
+  final bool isGroup;
+  final int? memberCount;
 
   const _ConversationTile({
     required this.peerName,
@@ -493,6 +661,8 @@ class _ConversationTile extends StatelessWidget {
     required this.isDark,
     required this.accent,
     required this.onTap,
+    this.isGroup = false,
+    this.memberCount,
   });
 
   String _formatTime(int ts) {
@@ -534,17 +704,21 @@ class _ConversationTile extends StatelessWidget {
                     borderRadius: BorderRadius.circular(16),
                   ),
                   child: Center(
-                    child: Text(
-                      peerName.isNotEmpty ? peerName[0].toUpperCase() : '?',
-                      style: TextStyle(
-                        color: accent,
-                        fontSize: 20,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
+                    child: isGroup
+                        ? Icon(Icons.group_rounded, color: accent, size: 24)
+                        : Text(
+                            peerName.isNotEmpty
+                                ? peerName[0].toUpperCase()
+                                : '?',
+                            style: TextStyle(
+                              color: accent,
+                              fontSize: 20,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
                   ),
                 ),
-                if (online)
+                if (online && !isGroup)
                   Positioned(
                     bottom: -2,
                     right: -2,
@@ -579,8 +753,8 @@ class _ConversationTile extends StatelessWidget {
                           unreadCount > 0 ? FontWeight.w700 : FontWeight.w600,
                     ),
                   ),
-                  if (lastMessage != null) ...[
-                    const SizedBox(height: 2),
+                  const SizedBox(height: 2),
+                  if (lastMessage != null)
                     Text(
                       lastMessage!,
                       maxLines: 1,
@@ -594,8 +768,13 @@ class _ConversationTile extends StatelessWidget {
                             ? FontWeight.w500
                             : FontWeight.normal,
                       ),
+                    )
+                  else if (isGroup && memberCount != null)
+                    Text(
+                      '$memberCount members',
+                      style: TextStyle(
+                          color: AppColors.textSecondary(isDark), fontSize: 12),
                     ),
-                  ],
                 ],
               ),
             ),

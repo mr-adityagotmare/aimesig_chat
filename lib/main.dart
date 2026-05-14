@@ -11,9 +11,11 @@ import 'core/network/udp_chat_service.dart';
 import 'core/network/file_transfer_service.dart';
 import 'core/services/message_queue_service.dart';
 import 'models/chat_message.dart';
+import 'models/group.dart';
 import 'models/peer.dart';
 import 'providers/peer_provider.dart';
 import 'providers/chat_provider.dart';
+import 'providers/group_provider.dart';
 import 'providers/theme_provider.dart';
 import 'screens/home/home_screen.dart';
 import 'screens/onboarding/onboarding_screen.dart';
@@ -43,6 +45,7 @@ class AimesigChatApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider(create: (_) => PeerProvider()),
         ChangeNotifierProvider(create: (_) => ChatProvider()),
+        ChangeNotifierProvider(create: (_) => GroupProvider()), // NEW
         ChangeNotifierProvider(create: (_) => ThemeProvider()),
       ],
       child: Consumer<ThemeProvider>(
@@ -98,6 +101,7 @@ class _AppRootState extends State<AppRoot> {
 
       deviceId = await DeviceId.generate(username);
       await context.read<ChatProvider>().loadMessages();
+      await context.read<GroupProvider>().loadGroups(); // NEW
       await startServices();
       setState(() => ready = true);
     } catch (e, stack) {
@@ -112,6 +116,7 @@ class _AppRootState extends State<AppRoot> {
   Future<void> startServices() async {
     final peerProvider = context.read<PeerProvider>();
     final chatProvider = context.read<ChatProvider>();
+    final groupProvider = context.read<GroupProvider>(); // NEW
 
     discovery?.stop();
     fileTransfer?.dispose();
@@ -119,6 +124,9 @@ class _AppRootState extends State<AppRoot> {
     final service = UdpChatService();
     udp = service;
     await service.start();
+
+    // Wire peerProvider into udp so broadcastToGroup can resolve IPs
+    service.peerProvider = peerProvider; // NEW
 
     final ft = FileTransferService(service);
     fileTransfer = ft;
@@ -143,9 +151,8 @@ class _AppRootState extends State<AppRoot> {
       }
     };
 
-    // Ask user before accepting file (auto-accept for now; swap in a dialog if needed)
+    // Ask user before accepting file (auto-accept for now)
     ft.onIncomingOffer = (id, peerIp, fileName, fileSize) async {
-      // Add a placeholder message immediately so the user can see the incoming transfer
       final peer = peerProvider.peers
           .where((p) => p.ip == peerIp)
           .firstOrNull;
@@ -167,7 +174,7 @@ class _AppRootState extends State<AppRoot> {
           transferProgress: 0.0,
         ),
       );
-      return true; // auto-accept
+      return true;
     };
 
     service.onMessage = (ip, data) async {
@@ -179,6 +186,71 @@ class _AppRootState extends State<AppRoot> {
         return;
       }
 
+      // ── Group invite ───────────────────────────────────────────────────────
+      if (type == 'GROUP_INVITE') {
+        final groupId = data['groupId'] as String;
+        final groupName = data['groupName'] as String;
+        final creatorDeviceId = data['creatorDeviceId'] as String;
+        final memberDeviceIds = (data['memberDeviceIds'] as String)
+            .split(',')
+            .where((s) => s.isNotEmpty)
+            .toList();
+        final memberNames = (data['memberNames'] as String)
+            .split(',')
+            .where((s) => s.isNotEmpty)
+            .toList();
+
+        // Only join if we're actually in the member list
+        if (!memberDeviceIds.contains(deviceId)) return;
+
+        // Check we don't already have it
+        if (groupProvider.getGroup(groupId) != null) return;
+
+        final group = Group(
+          id: groupId,
+          name: groupName,
+          creatorDeviceId: creatorDeviceId,
+          memberDeviceIds: memberDeviceIds,
+          memberNames: memberNames,
+          createdAt: DateTime.fromMillisecondsSinceEpoch(
+              data['timestamp'] as int),
+        );
+        await groupProvider.addGroup(group);
+
+        // Show a notification snackbar if we have a context
+        // (best-effort — no navigator key needed)
+        print('GROUP INVITE RECEIVED => $groupName');
+        return;
+      }
+
+      // ── Group message ──────────────────────────────────────────────────────
+      if (type == 'GROUP_MESSAGE') {
+        final groupId = data['groupId'] as String;
+        final sender = data['sender'] as String;
+        final msgId = data['id'] as String;
+        final message = data['message'] as String;
+        final ts = data['timestamp'] as int;
+
+        final group = groupProvider.getGroup(groupId);
+        if (group == null) return; // not a member of this group
+
+        await groupProvider.addGroupMessage(
+          groupId,
+          ChatMessage(
+            id: msgId,
+            sender: sender,
+            receiver: groupId,
+            message: message,
+            timestamp: ts,
+            mine: false,
+            delivered: true,
+            read: groupProvider.currentOpenGroup == groupId,
+          ),
+        );
+        return;
+      }
+
+      // ── 1-to-1 message ─────────────────────────────────────────────────────
       if (type == 'MESSAGE') {
         final sender  = data['sender'] as String;
         final message = data['message'] as String;
@@ -248,6 +320,7 @@ class _AppRootState extends State<AppRoot> {
       deviceId = await DeviceId.generate(name);
       username = name;
       await context.read<ChatProvider>().loadMessages();
+      await context.read<GroupProvider>().loadGroups(); // NEW
       await startServices();
       setState(() {
         isFirstTime = false;
@@ -368,6 +441,7 @@ class _AppRootState extends State<AppRoot> {
       udp: udp!,
       fileTransfer: fileTransfer!,
       username: username,
+      deviceId: deviceId, // NEW — pass deviceId for group creation
       onNameChanged: changeName,
     );
   }

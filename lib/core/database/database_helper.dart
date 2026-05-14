@@ -27,7 +27,7 @@ class DatabaseHelper {
 
     return openDatabase(
       path,
-      version: 3,
+      version: 4, // bumped for group tables
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE messages(
@@ -45,17 +45,80 @@ class DatabaseHelper {
             read      INTEGER DEFAULT 0
           )
         ''');
+
+        await db.execute('''
+          CREATE TABLE groups(
+            id              TEXT PRIMARY KEY,
+            name            TEXT,
+            creatorDeviceId TEXT,
+            memberDeviceIds TEXT,
+            memberNames     TEXT,
+            createdAt       INTEGER
+          )
+        ''');
+
+        await db.execute('''
+          CREATE TABLE group_messages(
+            id        TEXT PRIMARY KEY,
+            groupId   TEXT,
+            sender    TEXT,
+            receiver  TEXT,
+            message   TEXT,
+            timestamp INTEGER,
+            mine      INTEGER,
+            type      INTEGER DEFAULT 0,
+            filePath  TEXT,
+            fileName  TEXT,
+            fileSize  INTEGER,
+            delivered INTEGER DEFAULT 0,
+            read      INTEGER DEFAULT 0
+          )
+        ''');
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
-          await db.execute('ALTER TABLE messages ADD COLUMN delivered INTEGER DEFAULT 0');
-          await db.execute('ALTER TABLE messages ADD COLUMN read INTEGER DEFAULT 0');
+          await db.execute(
+              'ALTER TABLE messages ADD COLUMN delivered INTEGER DEFAULT 0');
+          await db.execute(
+              'ALTER TABLE messages ADD COLUMN read INTEGER DEFAULT 0');
         }
         if (oldVersion < 3) {
-          await db.execute('ALTER TABLE messages ADD COLUMN type INTEGER DEFAULT 0');
+          await db.execute(
+              'ALTER TABLE messages ADD COLUMN type INTEGER DEFAULT 0');
           await db.execute('ALTER TABLE messages ADD COLUMN filePath TEXT');
           await db.execute('ALTER TABLE messages ADD COLUMN fileName TEXT');
           await db.execute('ALTER TABLE messages ADD COLUMN fileSize INTEGER');
+        }
+        if (oldVersion < 4) {
+          // Add group tables on upgrade
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS groups(
+              id              TEXT PRIMARY KEY,
+              name            TEXT,
+              creatorDeviceId TEXT,
+              memberDeviceIds TEXT,
+              memberNames     TEXT,
+              createdAt       INTEGER
+            )
+          ''');
+
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS group_messages(
+              id        TEXT PRIMARY KEY,
+              groupId   TEXT,
+              sender    TEXT,
+              receiver  TEXT,
+              message   TEXT,
+              timestamp INTEGER,
+              mine      INTEGER,
+              type      INTEGER DEFAULT 0,
+              filePath  TEXT,
+              fileName  TEXT,
+              fileSize  INTEGER,
+              delivered INTEGER DEFAULT 0,
+              read      INTEGER DEFAULT 0
+            )
+          ''');
         }
       },
     );

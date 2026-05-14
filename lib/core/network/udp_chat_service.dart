@@ -1,12 +1,18 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../../models/group.dart';
+import '../../providers/peer_provider.dart';
+
 class UdpChatService {
   RawDatagramSocket? _socket;
 
   final int messagePort = 4040;
 
   Function(String ip, Map<String, dynamic> data)? onMessage;
+
+  // Inject PeerProvider so broadcastToGroup can resolve IPs
+  PeerProvider? peerProvider;
 
   Future<void> start() async {
     // reusePort omitted — not supported on Windows.
@@ -42,7 +48,7 @@ class UdpChatService {
     required Map<String, dynamic> data,
   }) {
     if (_socket == null) return;
-    if (ip.isEmpty) return; // peer is offline — message queue will retry
+    if (ip.isEmpty) return;
 
     try {
       final encoded = utf8.encode(jsonEncode(data));
@@ -50,6 +56,25 @@ class UdpChatService {
       print('UDP SENT => $data');
     } catch (e) {
       print('UDP SEND ERROR => $e');
+    }
+  }
+
+  /// Send a group message payload to all members of [group] whose IPs
+  /// we can resolve via [peerProvider].
+  void broadcastToGroup({
+    required Group group,
+    required String payload,
+  }) {
+    if (_socket == null) return;
+    final provider = peerProvider;
+    if (provider == null) return;
+
+    final data = jsonDecode(payload) as Map<String, dynamic>;
+
+    for (final peer in provider.peers) {
+      if (group.memberDeviceIds.contains(peer.deviceId)) {
+        sendMessage(ip: peer.ip, data: data);
+      }
     }
   }
 
