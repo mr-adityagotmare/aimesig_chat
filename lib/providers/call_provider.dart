@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../core/network/voice_call_service.dart';
 
 export '../core/network/voice_call_service.dart'
-    show CallState, CallType, VoiceCallSession;
+    show CallState, CallType, VoiceCallSession, AudioOutput;
 
 class CallProvider extends ChangeNotifier {
   VoiceCallService? _service;
@@ -14,6 +14,7 @@ class CallProvider extends ChangeNotifier {
   bool get hasActiveCall => session != null;
   bool get isMuted => _service?.isMuted ?? false;
   bool get isSpeakerOn => _service?.isSpeakerOn ?? false;
+  AudioOutput get audioOutput => _service?.audioOutput ?? AudioOutput.earpiece;
 
   /// Wire up the service (called once from main after services are ready).
   void init(VoiceCallService svc) {
@@ -64,13 +65,16 @@ class CallProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  void toggleMute() {
+  Future<void> toggleMute() async {
     _service?.toggleMute();
     notifyListeners();
   }
 
-  Future<void> toggleSpeaker() async {
-    await _service?.toggleSpeaker();
+  Future<List<AudioOutput>> availableAudioOutputs() async =>
+      await _service?.availableAudioOutputs() ?? [AudioOutput.earpiece, AudioOutput.speaker];
+
+  Future<void> setAudioOutput(AudioOutput output) async {
+    await _service?.setAudioOutput(output);
     notifyListeners();
   }
 }

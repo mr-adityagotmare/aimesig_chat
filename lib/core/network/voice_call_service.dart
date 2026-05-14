@@ -9,6 +9,13 @@ enum CallState { idle, calling, ringing, connected, ended }
 
 enum CallType { individual, group }
 
+/// The physical audio sink used during a call.
+enum AudioOutput {
+  earpiece,  // default – private, held to ear
+  headset,   // wired or Bluetooth headset (shown only when detected)
+  speaker,   // loud speakerphone
+}
+
 class VoiceCallSession {
   final String callId;
   final CallType type;
@@ -93,7 +100,7 @@ class VoiceCallService {
     );
     _notify();
 
-    // Signal the callee
+    // Signal the callee — audio/WebRTC starts only after CALL_ACCEPT is received
     udp.sendMessage(ip: peerIp, data: {
       'type': 'CALL_INVITE',
       'callId': callId,
@@ -101,10 +108,6 @@ class VoiceCallService {
       'callerDeviceId': myDeviceId,
       'callerName': myName,
     });
-
-    await _initLocalStream();
-    // Caller is impolite: creates the offer immediately after adding tracks
-    await _createPeerConnection(peerIp, polite: false, callId: callId);
   }
 
   /// Start a group voice call for [memberIps] (excluding self).
@@ -128,7 +131,7 @@ class VoiceCallService {
     );
     _notify();
 
-    // Invite every member
+    // Invite every member — audio/WebRTC starts only after CALL_ACCEPT is received
     for (final ip in memberIps) {
       udp.sendMessage(ip: ip, data: {
         'type': 'CALL_INVITE',
@@ -139,11 +142,6 @@ class VoiceCallService {
         'callerDeviceId': myDeviceId,
         'callerName': myName,
       });
-    }
-
-    await _initLocalStream();
-    for (final ip in memberIps) {
-      await _createPeerConnection(ip, polite: false, callId: callId);
     }
   }
 
@@ -228,16 +226,59 @@ class VoiceCallService {
     _notify();
   }
 
-  // ── Speaker ─────────────────────────────────────────────────────────────
+  // ── Audio output routing ─────────────────────────────────────────────────
 
-  bool _speakerOn = false;
-  bool get isSpeakerOn => _speakerOn;
+  AudioOutput _audioOutput = AudioOutput.earpiece;
+  AudioOutput get audioOutput => _audioOutput;
 
-  Future<void> toggleSpeaker() async {
-    _speakerOn = !_speakerOn;
-    await Helper.setSpeakerphoneOn(_speakerOn);
+  /// Returns available audio outputs for the current device state.
+  /// Always includes earpiece + speaker; headset added when detected.
+  Future<List<AudioOutput>> availableAudioOutputs() async {
+    final outputs = [AudioOutput.earpiece, AudioOutput.speaker];
+    try {
+      final devices = await navigator.mediaDevices.enumerateDevices();
+      final hasHeadset = devices.any((d) =>
+          d.kind == 'audiooutput' &&
+          (d.label.toLowerCase().contains('headset') ||
+              d.label.toLowerCase().contains('headphone') ||
+              d.label.toLowerCase().contains('bluetooth') ||
+              d.label.toLowerCase().contains('wired')));
+      if (hasHeadset) outputs.insert(1, AudioOutput.headset);
+    } catch (_) {
+      // enumerateDevices unsupported on this platform — skip headset detection
+    }
+    return outputs;
+  }
+
+  Future<void> setAudioOutput(AudioOutput output) async {
+    _audioOutput = output;
+    switch (output) {
+      case AudioOutput.earpiece:
+        await Helper.setSpeakerphoneOn(false);
+        break;
+      case AudioOutput.speaker:
+        await Helper.setSpeakerphoneOn(true);
+        break;
+      case AudioOutput.headset:
+        // Route to the connected wired/BT headset; disable speakerphone so
+        // the OS picks the headset as the preferred sink automatically.
+        await Helper.setSpeakerphoneOn(false);
+        break;
+    }
     _notify();
   }
+
+  // Keep a deprecated shim so existing callers don't break during migration.
+  @Deprecated('Use setAudioOutput() instead')
+  Future<void> toggleSpeaker() async {
+    final next = _audioOutput == AudioOutput.speaker
+        ? AudioOutput.earpiece
+        : AudioOutput.speaker;
+    await setAudioOutput(next);
+  }
+
+  /// Legacy getter kept for CallProvider backward-compat.
+  bool get isSpeakerOn => _audioOutput == AudioOutput.speaker;
 
   // ── Handling incoming UDP signals ────────────────────────────────────────
 
@@ -312,6 +353,19 @@ class VoiceCallService {
 
     session.state = CallState.connected;
     _notify();
+
+    // NOW start audio capture and WebRTC negotiation on the caller side
+    await _initLocalStream();
+
+    final ips = session.type == CallType.individual
+        ? [session.peerIp!]
+        : session.memberIps;
+
+    for (final ip in ips) {
+      // Caller is impolite: creates the offer after the callee has accepted
+      await _createPeerConnection(ip, polite: false, callId: session.callId);
+    }
+
     _startDurationTimer();
   }
 
@@ -376,10 +430,15 @@ class VoiceCallService {
   // ── WebRTC helpers ────────────────────────────────────────────────────────
 
   Future<void> _initLocalStream() async {
-    _localStream ??= await navigator.mediaDevices.getUserMedia({
+    if (_localStream != null) return;
+    _localStream = await navigator.mediaDevices.getUserMedia({
       'audio': true,
       'video': false,
     });
+    // Explicitly enforce the desired audio output after getUserMedia.
+    // On many Android devices, opening a mic stream resets the audio
+    // session to speakerphone; re-applying the route here corrects it.
+    await setAudioOutput(_audioOutput);
   }
 
   static const _iceServers = {
@@ -460,7 +519,7 @@ class VoiceCallService {
     _localStream = null;
 
     _muted = false;
-    _speakerOn = false;
+    _audioOutput = AudioOutput.earpiece;
     _session = null;
     _notify();
   }

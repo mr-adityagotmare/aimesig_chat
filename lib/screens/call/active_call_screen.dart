@@ -15,6 +15,48 @@ class ActiveCallScreen extends StatelessWidget {
     return '$m:$s';
   }
 
+  IconData _audioOutputIcon(AudioOutput output) {
+    switch (output) {
+      case AudioOutput.earpiece:
+        return Icons.phone_in_talk_rounded;
+      case AudioOutput.headset:
+        return Icons.headset_rounded;
+      case AudioOutput.speaker:
+        return Icons.volume_up_rounded;
+    }
+  }
+
+  String _audioOutputLabel(AudioOutput output) {
+    switch (output) {
+      case AudioOutput.earpiece:
+        return 'Earpiece';
+      case AudioOutput.headset:
+        return 'Headset';
+      case AudioOutput.speaker:
+        return 'Speaker';
+    }
+  }
+
+  void _showAudioOutputPicker(BuildContext context, CallProvider cp) async {
+    final available = await cp.availableAudioOutputs();
+    if (!context.mounted) return;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        return _AudioOutputSheet(
+          available: available,
+          current: cp.audioOutput,
+          onSelect: (output) {
+            cp.setAudioOutput(output);
+            Navigator.of(ctx).pop();
+          },
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final cp = context.watch<CallProvider>();
@@ -112,14 +154,12 @@ class ActiveCallScreen extends StatelessWidget {
                     ),
                   ),
 
-                  // Speaker
+                  // Audio output
                   _CircleButton(
-                    icon: cp.isSpeakerOn
-                        ? Icons.volume_up_rounded
-                        : Icons.volume_down_rounded,
-                    label: 'Speaker',
-                    active: cp.isSpeakerOn,
-                    onTap: () => cp.toggleSpeaker(),
+                    icon: _audioOutputIcon(cp.audioOutput),
+                    label: _audioOutputLabel(cp.audioOutput),
+                    active: cp.audioOutput == AudioOutput.speaker,
+                    onTap: () => _showAudioOutputPicker(context, cp),
                   ),
                 ],
               ),
@@ -215,6 +255,137 @@ class _CircleButton extends StatelessWidget {
             label,
             style: const TextStyle(color: Colors.white60, fontSize: 11),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Audio output picker sheet ─────────────────────────────────────────────────
+
+class _AudioOutputSheet extends StatelessWidget {
+  final List<AudioOutput> available;
+  final AudioOutput current;
+  final ValueChanged<AudioOutput> onSelect;
+
+  const _AudioOutputSheet({
+    required this.available,
+    required this.current,
+    required this.onSelect,
+  });
+
+  IconData _icon(AudioOutput o) {
+    switch (o) {
+      case AudioOutput.earpiece:
+        return Icons.phone_in_talk_rounded;
+      case AudioOutput.headset:
+        return Icons.headset_rounded;
+      case AudioOutput.speaker:
+        return Icons.volume_up_rounded;
+    }
+  }
+
+  String _label(AudioOutput o) {
+    switch (o) {
+      case AudioOutput.earpiece:
+        return 'Earpiece';
+      case AudioOutput.headset:
+        return 'Headset';
+      case AudioOutput.speaker:
+        return 'Speaker';
+    }
+  }
+
+  String _subtitle(AudioOutput o) {
+    switch (o) {
+      case AudioOutput.earpiece:
+        return 'Private — hold phone to ear';
+      case AudioOutput.headset:
+        return 'Connected headset / Bluetooth';
+      case AudioOutput.speaker:
+        return 'Loud speakerphone';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: Color(0xFF1E1E2E),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      padding: const EdgeInsets.fromLTRB(0, 12, 0, 32),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Handle bar
+          Container(
+            width: 36,
+            height: 4,
+            margin: const EdgeInsets.only(bottom: 16),
+            decoration: BoxDecoration(
+              color: Colors.white24,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+
+          const Padding(
+            padding: EdgeInsets.only(left: 20, bottom: 8),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'Audio output',
+                style: TextStyle(
+                  color: Colors.white70,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.8,
+                ),
+              ),
+            ),
+          ),
+
+          ...available.map((output) {
+            final selected = output == current;
+            return ListTile(
+              leading: Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: selected
+                      ? const Color(0xFF4CAF50).withOpacity(0.15)
+                      : Colors.white.withOpacity(0.08),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  _icon(output),
+                  color: selected ? const Color(0xFF4CAF50) : Colors.white60,
+                  size: 22,
+                ),
+              ),
+              title: Text(
+                _label(output),
+                style: TextStyle(
+                  color: selected ? Colors.white : Colors.white70,
+                  fontWeight:
+                      selected ? FontWeight.w600 : FontWeight.w400,
+                  fontSize: 15,
+                ),
+              ),
+              subtitle: Text(
+                _subtitle(output),
+                style: const TextStyle(
+                  color: Colors.white38,
+                  fontSize: 12,
+                ),
+              ),
+              trailing: selected
+                  ? const Icon(Icons.check_circle_rounded,
+                      color: Color(0xFF4CAF50), size: 22)
+                  : null,
+              onTap: () => onSelect(output),
+            );
+          }),
         ],
       ),
     );
