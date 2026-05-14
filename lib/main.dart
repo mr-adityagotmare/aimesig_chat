@@ -1,10 +1,14 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'core/database/database_helper.dart';
 import 'core/network/lan_discovery_service.dart';
 import 'core/network/udp_chat_service.dart';
+import 'core/services/message_queue_service.dart';
 import 'models/peer.dart';
 import 'models/chat_message.dart';
 import 'providers/peer_provider.dart';
@@ -14,14 +18,21 @@ import 'screens/home/home_screen.dart';
 import 'screens/onboarding/onboarding_screen.dart';
 import 'theme/app_theme.dart';
 import 'utils/device_id.dart';
-import 'core/services/message_queue_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  SystemChrome.setPreferredOrientations([
-    DeviceOrientation.portraitUp,
-    DeviceOrientation.portraitDown,
-  ]);
+
+  // Must be called before any DB access on Linux/Windows.
+  DatabaseHelper.initFfiIfNeeded();
+
+  // Orientation lock is mobile-only — crashes on Linux/Windows.
+  if (Platform.isAndroid || Platform.isIOS) {
+    await SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.portraitDown,
+    ]);
+  }
+
   runApp(const AimesigChatApp());
 }
 
@@ -58,12 +69,13 @@ class AppRoot extends StatefulWidget {
 
 class _AppRootState extends State<AppRoot> {
   LanDiscoveryService? discovery;
-  late UdpChatService udp;
+  UdpChatService? udp;
   String username = '';
-  String deviceId = '';   // ← stable, never changes with network/restart
+  String deviceId = '';
   MessageQueueService? _messageQueue;
   bool ready = false;
   bool isFirstTime = false;
+  String? _initError;
 
   @override
   void initState() {
@@ -72,123 +84,138 @@ class _AppRootState extends State<AppRoot> {
   }
 
   Future<void> init() async {
-    await context.read<ThemeProvider>().loadTheme();
-    final prefs = await SharedPreferences.getInstance();
-    username = prefs.getString('username') ?? '';
+    try {
+      await context.read<ThemeProvider>().loadTheme();
+      final prefs = await SharedPreferences.getInstance();
+      username = prefs.getString('username') ?? '';
 
-    if (username.isEmpty) {
+      if (username.isEmpty) {
+        setState(() {
+          isFirstTime = true;
+          ready = true;
+        });
+        return;
+      }
+
+      deviceId = await DeviceId.generate(username);
+      await context.read<ChatProvider>().loadMessages();
+      await startServices();
+      setState(() => ready = true);
+    } catch (e, stack) {
+      print('INIT ERROR => $e\n$stack');
       setState(() {
-        isFirstTime = true;
+        _initError = e.toString();
         ready = true;
       });
-      return;
     }
-
-    // Load (or lazily create) the stable device ID.
-    deviceId = await DeviceId.generate(username);
-
-    await context.read<ChatProvider>().loadMessages();
-    await startServices();
-    setState(() => ready = true);
   }
 
-  Future<void> startServices() async {
-    final peerProvider = context.read<PeerProvider>();
-    final chatProvider = context.read<ChatProvider>();
+Future<void> startServices() async {
+  final peerProvider = context.read<PeerProvider>();
+  final chatProvider = context.read<ChatProvider>();
 
-    discovery?.stop();
-    udp = UdpChatService();
-    await udp.start();
+  discovery?.stop();
+  final service = UdpChatService();  // local variable — non-null
+  udp = service;                     // assign field too
+  await service.start();             // use local, not field
 
-    udp.onMessage = (ip, data) async {
-      final type = data['type'];
+  service.onMessage = (ip, data) async {
+    final type = data['type'];
 
-      if (type == 'MESSAGE') {
-        final sender = data['sender'];
-        final message = data['message'];
-        final msgId = data['id'];
+    if (type == 'MESSAGE') {
+      final sender  = data['sender'];
+      final message = data['message'];
+      final msgId   = data['id'];
 
-        await chatProvider.addMessage(
-          sender,
-          ChatMessage(
-            id: msgId,
-            sender: sender,
-            receiver: username,
-            message: message,
-            timestamp: data['timestamp'],
-            mine: false,
-            delivered: true,
-            read: false,
-          ),
-        );
+      await chatProvider.addMessage(
+        sender,
+        ChatMessage(
+          id: msgId,
+          sender: sender,
+          receiver: username,
+          message: message,
+          timestamp: data['timestamp'],
+          mine: false,
+          delivered: true,
+          read: false,
+        ),
+      );
 
-        udp.sendMessage(ip: ip, data: {'type': 'DELIVERED', 'id': msgId});
+      service.sendMessage(ip: ip, data: {'type': 'DELIVERED', 'id': msgId});
 
-        if (chatProvider.currentOpenChat == sender) {
-          await chatProvider.markRead(msgId);
-          udp.sendMessage(ip: ip, data: {'type': 'READ', 'id': msgId});
-        }
-      } else if (type == 'DELIVERED') {
-        await chatProvider.markDelivered(data['id']);
-      } else if (type == 'READ') {
-        await chatProvider.markRead(data['id']);
+      if (chatProvider.currentOpenChat == sender) {
+        await chatProvider.markRead(msgId);
+        service.sendMessage(ip: ip, data: {'type': 'READ', 'id': msgId});
       }
-    };
+    } else if (type == 'DELIVERED') {
+      await chatProvider.markDelivered(data['id']);
+    } else if (type == 'READ') {
+      await chatProvider.markRead(data['id']);
+    }
+  };
 
-    discovery = LanDiscoveryService(deviceId: deviceId, username: username);
-    discovery!.onPeerFound = (peerData) {
-      peerProvider.updatePeer(Peer(
-        deviceId: peerData['deviceId'],
-        name: peerData['name'],
-        ip: peerData['ip'],
-        port: peerData['port'],
-        online: true,
-        lastSeen: DateTime.now(),
-      ));
-    };
+  discovery = LanDiscoveryService(deviceId: deviceId, username: username);
+  discovery!.onPeerFound = (peerData) {
+    peerProvider.updatePeer(Peer(
+      deviceId: peerData['deviceId'],
+      name: peerData['name'],
+      ip: peerData['ip'],
+      port: peerData['port'],
+      online: true,
+      lastSeen: DateTime.now(),
+    ));
+  };
 
-    await discovery!.start();
+  await discovery!.start();
 
-    // Start retry loop — resends undelivered messages whenever a peer comes back online.
-    _messageQueue?.stop();
-    _messageQueue = MessageQueueService(
-      chatProvider: chatProvider,
-      peerProvider: peerProvider,
-      udp: udp,
-      myName: username,
-    );
-    _messageQueue!.start();
-  }
+  _messageQueue?.stop();
+  _messageQueue = MessageQueueService(
+    chatProvider: chatProvider,
+    peerProvider: peerProvider,
+    udp: service,   // pass local, not field
+    myName: username,
+  );
+  _messageQueue!.start();
+}
 
   Future<void> onNameSet(String name) async {
-    deviceId = await DeviceId.generate(name);
-    setState(() {
-      username = name;
-      isFirstTime = false;
-    });
-    await context.read<ChatProvider>().loadMessages();
-    await startServices();
-    setState(() => ready = true);
+    try {
+      deviceId = await DeviceId.generate(name);
+      // ❌ Don't flip isFirstTime here — build() can run while startServices()
+      // is still awaiting, hitting the udp! null check.
+      await context.read<ChatProvider>().loadMessages();
+      await startServices();
+      // ✅ Only now is udp guaranteed to be non-null
+      setState(() {
+        username = name;
+        isFirstTime = false;
+        ready = true;
+      });
+    } catch (e) {
+      print('onNameSet ERROR => $e');
+    }
   }
 
   Future<void> changeName(String newName) async {
-    deviceId = await DeviceId.generate(newName);
-    setState(() => username = newName);
-    await startServices();
+    try {
+      deviceId = await DeviceId.generate(newName);
+      setState(() => username = newName);
+      await startServices();
+    } catch (e) {
+      print('changeName ERROR => $e');
+    }
   }
 
   @override
   void dispose() {
     discovery?.stop();
     _messageQueue?.stop();
-    udp.stop();
+    udp?.stop();   // was: udp.stop()
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final isDark = context.watch<ThemeProvider>().isDark;
-
     if (!ready) {
       return Scaffold(
         backgroundColor: AppColors.darkBg,
@@ -228,7 +255,7 @@ class _AppRootState extends State<AppRoot> {
                 ),
               ),
               const SizedBox(height: 32),
-              SizedBox(
+              const SizedBox(
                 width: 28,
                 height: 28,
                 child: CircularProgressIndicator(
@@ -242,12 +269,48 @@ class _AppRootState extends State<AppRoot> {
       );
     }
 
+    if (_initError != null) {
+      return Scaffold(
+        backgroundColor: AppColors.darkBg,
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.error_outline, color: Colors.red, size: 48),
+                const SizedBox(height: 16),
+                const Text('Failed to start',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700)),
+                const SizedBox(height: 12),
+                Text(_initError!,
+                    style: const TextStyle(color: Colors.red, fontSize: 12),
+                    textAlign: TextAlign.center),
+                const SizedBox(height: 24),
+                TextButton(
+                  onPressed: () {
+                    setState(() { ready = false; _initError = null; });
+                    init();
+                  },
+                  child: const Text('Retry',
+                      style: TextStyle(color: AppColors.accentGreen)),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     if (isFirstTime) {
       return OnboardingScreen(onDone: onNameSet);
     }
 
     return HomeScreen(
-      udp: udp,
+      udp: udp!,       // was: udp
       username: username,
       onNameChanged: changeName,
     );
