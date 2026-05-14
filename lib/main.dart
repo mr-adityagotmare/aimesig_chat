@@ -9,6 +9,7 @@ import 'core/database/database_helper.dart';
 import 'core/network/lan_discovery_service.dart';
 import 'core/network/udp_chat_service.dart';
 import 'core/network/file_transfer_service.dart';
+import 'core/network/voice_call_service.dart'; // NEW
 import 'core/services/message_queue_service.dart';
 import 'models/chat_message.dart';
 import 'models/group.dart';
@@ -17,8 +18,10 @@ import 'providers/peer_provider.dart';
 import 'providers/chat_provider.dart';
 import 'providers/group_provider.dart';
 import 'providers/theme_provider.dart';
+import 'providers/call_provider.dart'; // NEW
 import 'screens/home/home_screen.dart';
 import 'screens/onboarding/onboarding_screen.dart';
+import 'screens/call/incoming_call_overlay.dart'; // NEW
 import 'theme/app_theme.dart';
 import 'utils/device_id.dart';
 
@@ -45,8 +48,9 @@ class AimesigChatApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider(create: (_) => PeerProvider()),
         ChangeNotifierProvider(create: (_) => ChatProvider()),
-        ChangeNotifierProvider(create: (_) => GroupProvider()), // NEW
+        ChangeNotifierProvider(create: (_) => GroupProvider()),
         ChangeNotifierProvider(create: (_) => ThemeProvider()),
+        ChangeNotifierProvider(create: (_) => CallProvider()), // NEW
       ],
       child: Consumer<ThemeProvider>(
         builder: (context, themeProvider, _) {
@@ -72,6 +76,7 @@ class _AppRootState extends State<AppRoot> {
   LanDiscoveryService? discovery;
   UdpChatService? udp;
   FileTransferService? fileTransfer;
+  VoiceCallService? _voiceCall; // NEW
   String username = '';
   String deviceId = '';
   MessageQueueService? _messageQueue;
@@ -101,7 +106,7 @@ class _AppRootState extends State<AppRoot> {
 
       deviceId = await DeviceId.generate(username);
       await context.read<ChatProvider>().loadMessages();
-      await context.read<GroupProvider>().loadGroups(); // NEW
+      await context.read<GroupProvider>().loadGroups();
       await startServices();
       setState(() => ready = true);
     } catch (e, stack) {
@@ -116,20 +121,39 @@ class _AppRootState extends State<AppRoot> {
   Future<void> startServices() async {
     final peerProvider = context.read<PeerProvider>();
     final chatProvider = context.read<ChatProvider>();
-    final groupProvider = context.read<GroupProvider>(); // NEW
+    final groupProvider = context.read<GroupProvider>();
+    final callProvider = context.read<CallProvider>(); // NEW
 
     discovery?.stop();
     fileTransfer?.dispose();
+    _voiceCall?.dispose(); // NEW
 
     final service = UdpChatService();
     udp = service;
     await service.start();
 
     // Wire peerProvider into udp so broadcastToGroup can resolve IPs
-    service.peerProvider = peerProvider; // NEW
+    service.peerProvider = peerProvider;
 
     final ft = FileTransferService(service);
     fileTransfer = ft;
+
+    // ── NEW: Voice call service ──────────────────────────────────────────
+    final vc = VoiceCallService(
+      udp: service,
+      myDeviceId: deviceId,
+      myName: username,
+    );
+    _voiceCall = vc;
+    callProvider.init(vc);
+
+    // Show incoming call overlay when a call arrives
+    vc.onIncomingCall = (session) {
+      if (mounted) {
+        showIncomingCallSheet(context);
+      }
+    };
+    // ────────────────────────────────────────────────────────────────────
 
     // Wire up incoming file progress → ChatProvider
     ft.onReceiveProgress = (id, fileName, received, total, state, {savedPath}) {
@@ -186,6 +210,12 @@ class _AppRootState extends State<AppRoot> {
         return;
       }
 
+      // NEW: Route call-signalling packets to VoiceCallService
+      if (type != null && type.startsWith('CALL_')) {
+        await vc.handleSignal(ip, data);
+        return;
+      }
+
       // ── Group invite ───────────────────────────────────────────────────────
       if (type == 'GROUP_INVITE') {
         final groupId = data['groupId'] as String;
@@ -200,10 +230,7 @@ class _AppRootState extends State<AppRoot> {
             .where((s) => s.isNotEmpty)
             .toList();
 
-        // Only join if we're actually in the member list
         if (!memberDeviceIds.contains(deviceId)) return;
-
-        // Check we don't already have it
         if (groupProvider.getGroup(groupId) != null) return;
 
         final group = Group(
@@ -216,9 +243,6 @@ class _AppRootState extends State<AppRoot> {
               data['timestamp'] as int),
         );
         await groupProvider.addGroup(group);
-
-        // Show a notification snackbar if we have a context
-        // (best-effort — no navigator key needed)
         print('GROUP INVITE RECEIVED => $groupName');
         return;
       }
@@ -232,7 +256,7 @@ class _AppRootState extends State<AppRoot> {
         final ts = data['timestamp'] as int;
 
         final group = groupProvider.getGroup(groupId);
-        if (group == null) return; // not a member of this group
+        if (group == null) return;
 
         await groupProvider.addGroupMessage(
           groupId,
@@ -320,7 +344,7 @@ class _AppRootState extends State<AppRoot> {
       deviceId = await DeviceId.generate(name);
       username = name;
       await context.read<ChatProvider>().loadMessages();
-      await context.read<GroupProvider>().loadGroups(); // NEW
+      await context.read<GroupProvider>().loadGroups();
       await startServices();
       setState(() {
         isFirstTime = false;
@@ -348,6 +372,7 @@ class _AppRootState extends State<AppRoot> {
     _messageQueue?.stop();
     udp?.stop();
     fileTransfer?.dispose();
+    _voiceCall?.dispose(); // NEW
     super.dispose();
   }
 
@@ -441,7 +466,7 @@ class _AppRootState extends State<AppRoot> {
       udp: udp!,
       fileTransfer: fileTransfer!,
       username: username,
-      deviceId: deviceId, // NEW — pass deviceId for group creation
+      deviceId: deviceId,
       onNameChanged: changeName,
     );
   }

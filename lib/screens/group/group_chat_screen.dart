@@ -9,6 +9,9 @@ import '../../models/group.dart';
 import '../../providers/group_provider.dart';
 import '../../providers/theme_provider.dart';
 import '../../theme/app_theme.dart';
+import '../../providers/call_provider.dart'; // NEW
+import '../../providers/peer_provider.dart'; // NEW
+import '../call/active_call_screen.dart'; // NEW
 
 class GroupChatScreen extends StatefulWidget {
   final Group group;
@@ -164,6 +167,34 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           ],
         ),
         actions: [
+          // NEW: Group voice call button
+          IconButton(
+            icon: Icon(Icons.call_rounded, color: textSecondary, size: 20),
+            tooltip: 'Group voice call',
+            onPressed: () async {
+              final cp = context.read<CallProvider>();
+              if (cp.hasActiveCall) return;
+              final peers = context.read<PeerProvider>().peers;
+              final memberIps = peers
+                  .where((p) =>
+                      group.memberDeviceIds.contains(p.deviceId) &&
+                      p.deviceId != widget.myDeviceId &&
+                      p.online)
+                  .map((p) => p.ip)
+                  .toList();
+              if (memberIps.isEmpty) return;
+              await cp.startGroupCall(
+                groupId: group.id,
+                groupName: group.name,
+                memberIps: memberIps,
+              );
+              if (mounted) {
+                Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => const ActiveCallScreen(),
+                ));
+              }
+            },
+          ),
           IconButton(
             icon: Icon(Icons.info_outline_rounded,
                 color: textSecondary, size: 20),

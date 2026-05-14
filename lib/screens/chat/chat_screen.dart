@@ -13,6 +13,8 @@ import '../../models/peer.dart';
 import '../../providers/chat_provider.dart';
 import '../../providers/theme_provider.dart';
 import '../../theme/app_theme.dart';
+import '../../providers/call_provider.dart'; // NEW
+import '../call/active_call_screen.dart'; // NEW
 
 class ChatScreen extends StatefulWidget {
   final Peer peer;
@@ -412,6 +414,27 @@ class _ChatScreenState extends State<ChatScreen> {
         ],
       ),
       actions: [
+        // NEW: Voice call button
+        if (widget.peer.online)
+          IconButton(
+            icon: Icon(Icons.call_rounded,
+                color: AppColors.textSecondary(isDark), size: 22),
+            tooltip: 'Voice call',
+            onPressed: () async {
+              final cp = context.read<CallProvider>();
+              if (cp.hasActiveCall) return; // already in a call
+              await cp.startIndividualCall(
+                peerIp: widget.peer.ip,
+                peerName: widget.peer.name,
+                peerDeviceId: widget.peer.deviceId,
+              );
+              if (mounted) {
+                Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => const ActiveCallScreen(),
+                ));
+              }
+            },
+          ),
         PopupMenuButton<String>(
           icon: Icon(Icons.more_vert_rounded,
               color: AppColors.textSecondary(isDark)),
