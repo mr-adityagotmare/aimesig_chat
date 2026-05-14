@@ -181,13 +181,10 @@ Future<void> startServices() async {
   Future<void> onNameSet(String name) async {
     try {
       deviceId = await DeviceId.generate(name);
-      // ❌ Don't flip isFirstTime here — build() can run while startServices()
-      // is still awaiting, hitting the udp! null check.
+      username = name;  // ✅ set BEFORE startServices() reads it
       await context.read<ChatProvider>().loadMessages();
       await startServices();
-      // ✅ Only now is udp guaranteed to be non-null
       setState(() {
-        username = name;
         isFirstTime = false;
         ready = true;
       });
@@ -196,15 +193,16 @@ Future<void> startServices() async {
     }
   }
 
-  Future<void> changeName(String newName) async {
-    try {
-      deviceId = await DeviceId.generate(newName);
-      setState(() => username = newName);
-      await startServices();
-    } catch (e) {
-      print('changeName ERROR => $e');
-    }
+Future<void> changeName(String newName) async {
+  try {
+    deviceId = await DeviceId.generate(newName);
+    username = newName;  // ✅ set BEFORE startServices()
+    await startServices();
+    setState(() {});     // just trigger a rebuild
+  } catch (e) {
+    print('changeName ERROR => $e');
   }
+}
 
   @override
   void dispose() {
