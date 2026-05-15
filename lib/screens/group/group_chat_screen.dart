@@ -11,7 +11,10 @@ import '../../providers/theme_provider.dart';
 import '../../theme/app_theme.dart';
 import '../../providers/call_provider.dart'; // NEW
 import '../../providers/peer_provider.dart'; // NEW
+import '../../providers/video_call_provider.dart'; // NEW
 import '../call/active_call_screen.dart'; // NEW
+import '../call/active_group_video_call_screen.dart'; // NEW
+import '../../widgets/active_call_banner.dart';
 
 class GroupChatScreen extends StatefulWidget {
   final Group group;
@@ -167,7 +170,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           ],
         ),
         actions: [
-          // NEW: Group voice call button
+          // Group voice call button
           IconButton(
             icon: Icon(Icons.call_rounded, color: textSecondary, size: 20),
             tooltip: 'Group voice call',
@@ -189,8 +192,45 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                 memberIps: memberIps,
               );
               if (mounted) {
-                Navigator.of(context).push(MaterialPageRoute(
+                Navigator.of(context, rootNavigator: true).push(MaterialPageRoute(
                   builder: (_) => const ActiveCallScreen(),
+                ));
+              }
+            },
+          ),
+          // Group video call button
+          IconButton(
+            icon: Icon(Icons.videocam_rounded, color: textSecondary, size: 22),
+            tooltip: 'Group video call',
+            onPressed: () async {
+              final vcp = context.read<VideoCallProvider>();
+              if (vcp.hasActiveCall) return;
+              final peers = context.read<PeerProvider>().peers;
+              final memberIps = peers
+                  .where((p) =>
+                      group.memberDeviceIds.contains(p.deviceId) &&
+                      p.deviceId != widget.myDeviceId &&
+                      p.online)
+                  .map((p) => p.ip)
+                  .toList();
+              if (memberIps.isEmpty) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('No online members to call'),
+                    duration: Duration(seconds: 2),
+                  ),
+                );
+                return;
+              }
+              await vcp.service?.initRenderers();
+              await vcp.startGroupCall(
+                groupId: group.id,
+                groupName: group.name,
+                memberIps: memberIps,
+              );
+              if (mounted) {
+                Navigator.of(context, rootNavigator: true).push(MaterialPageRoute(
+                  builder: (_) => const ActiveGroupVideoCallScreen(),
                 ));
               }
             },
@@ -204,6 +244,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       ),
       body: Column(
         children: [
+          // In-call banner — tap to return to active call
+          const ActiveCallBanner(),
           Expanded(
             child: msgs.isEmpty
                 ? Center(

@@ -14,7 +14,10 @@ import '../../providers/chat_provider.dart';
 import '../../providers/theme_provider.dart';
 import '../../theme/app_theme.dart';
 import '../../providers/call_provider.dart'; // NEW
+import '../../widgets/active_call_banner.dart';
 import '../call/active_call_screen.dart'; // NEW
+import '../../providers/video_call_provider.dart';
+import '../call/active_video_call_screen.dart';
 
 class ChatScreen extends StatefulWidget {
   final Peer peer;
@@ -284,6 +287,8 @@ class _ChatScreenState extends State<ChatScreen> {
       appBar: _buildAppBar(isDark, accent),
       body: Column(
         children: [
+          // In-call banner — tap to return to active call
+          const ActiveCallBanner(),
           Expanded(
             child: msgs.isEmpty
                 ? _buildEmptyChat(isDark, accent)
@@ -429,8 +434,30 @@ class _ChatScreenState extends State<ChatScreen> {
                 peerDeviceId: widget.peer.deviceId,
               );
               if (mounted) {
-                Navigator.of(context).push(MaterialPageRoute(
+                Navigator.of(context, rootNavigator: true).push(MaterialPageRoute(
                   builder: (_) => const ActiveCallScreen(),
+                ));
+              }
+            },
+          ),
+          // Video call button — add BEFORE the existing voice call button
+        if (widget.peer.online)
+          IconButton(
+            icon: Icon(Icons.videocam_rounded,
+                color: AppColors.textSecondary(isDark), size: 24),
+            tooltip: 'Video call',
+            onPressed: () async {
+              final vcp = context.read<VideoCallProvider>();
+              if (vcp.hasActiveCall) return;
+              await vcp.service?.initRenderers();
+              await vcp.startIndividualCall(
+                peerIp: widget.peer.ip,
+                peerName: widget.peer.name,
+                peerDeviceId: widget.peer.deviceId,
+              );
+              if (mounted) {
+                Navigator.of(context, rootNavigator: true).push(MaterialPageRoute(
+                  builder: (_) => const ActiveVideoCallScreen(),
                 ));
               }
             },

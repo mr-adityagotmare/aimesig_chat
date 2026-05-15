@@ -1,19 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import '../../providers/call_provider.dart';
+import '../../providers/video_call_provider.dart';
 import '../../theme/app_theme.dart';
-import 'active_call_screen.dart';
+import 'active_video_call_screen.dart';
+import 'active_group_video_call_screen.dart';
 
-/// Show this as a dialog/overlay when an incoming call arrives.
-/// Typically called from main.dart via the onIncomingCall callback.
-class IncomingCallOverlay extends StatelessWidget {
-  const IncomingCallOverlay({super.key});
+/// Show this as a modal bottom sheet when an incoming video call arrives.
+/// Call [showIncomingVideoCallSheet] from your onIncomingCall callback.
+class IncomingVideoCallOverlay extends StatelessWidget {
+  const IncomingVideoCallOverlay({super.key});
 
   @override
   Widget build(BuildContext context) {
-    final cp = context.watch<CallProvider>();
-    final session = cp.session;
+    final vcp = context.watch<VideoCallProvider>();
+    final session = vcp.session;
     if (session == null) return const SizedBox.shrink();
 
     final isDark = Theme.of(context).brightness == Brightness.dark;
@@ -24,11 +25,12 @@ class IncomingCallOverlay extends StatelessWidget {
       child: Container(
         decoration: BoxDecoration(
           color: isDark ? AppColors.darkSurface : Colors.white,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+          borderRadius:
+              const BorderRadius.vertical(top: Radius.circular(28)),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.25),
-              blurRadius: 24,
+              color: Colors.black.withOpacity(0.28),
+              blurRadius: 28,
               offset: const Offset(0, -4),
             ),
           ],
@@ -61,7 +63,7 @@ class IncomingCallOverlay extends StatelessWidget {
                 shape: BoxShape.circle,
               ),
               child: Center(
-                child: session.type == CallType.group
+                child: session.type == VideoCallType.group
                     ? const Icon(Icons.group_rounded,
                         color: Colors.white, size: 36)
                     : Text(
@@ -88,14 +90,25 @@ class IncomingCallOverlay extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 6),
-            Text(
-              session.type == CallType.group
-                  ? 'Incoming group voice call'
-                  : 'Incoming voice call',
-              style: TextStyle(
-                color: AppColors.textMuted(isDark),
-                fontSize: 13,
-              ),
+
+            // Video call label with icon
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.videocam_rounded,
+                    size: 16,
+                    color: AppColors.textMuted(isDark)),
+                const SizedBox(width: 4),
+                Text(
+                  session.type == VideoCallType.group
+                      ? 'Incoming group video call'
+                      : 'Incoming video call',
+                  style: TextStyle(
+                    color: AppColors.textMuted(isDark),
+                    fontSize: 13,
+                  ),
+                ),
+              ],
             ),
 
             const SizedBox(height: 36),
@@ -109,22 +122,34 @@ class IncomingCallOverlay extends StatelessWidget {
                   label: 'Decline',
                   color: const Color(0xFFE53935),
                   onTap: () {
-                    cp.declineCall();
+                    vcp.declineCall();
                     Navigator.of(context).pop();
                   },
                 ),
 
                 // Accept
                 _CallButton(
-                  icon: Icons.call_rounded,
+                  icon: Icons.videocam_rounded,
                   label: 'Accept',
                   color: const Color(0xFF43A047),
                   onTap: () async {
+                    // Capture the root navigator BEFORE popping the sheet,
+                    // so we still have a valid navigator after dismissal.
                     final nav = Navigator.of(context, rootNavigator: true);
-                    await cp.acceptCall();
-                    nav.pop(); // close overlay
+                    final isGroup = vcp.session?.type == VideoCallType.group;
+
+                    // Init renderers, then accept
+                    await vcp.service?.initRenderers();
+                    await vcp.acceptCall();
+
+                    // Dismiss the bottom sheet
+                    nav.pop();
+
+                    // Push the call screen onto the root navigator
                     nav.push(MaterialPageRoute(
-                      builder: (_) => const ActiveCallScreen(),
+                      builder: (_) => isGroup
+                          ? const ActiveGroupVideoCallScreen()
+                          : const ActiveVideoCallScreen(),
                     ));
                   },
                 ),
@@ -159,27 +184,27 @@ class _CallButton extends StatelessWidget {
           Container(
             width: 64,
             height: 64,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+            decoration:
+                BoxDecoration(color: color, shape: BoxShape.circle),
             child: Icon(icon, color: Colors.white, size: 28),
           ),
           const SizedBox(height: 8),
-          Text(
-            label,
-            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-          ),
+          Text(label,
+              style: const TextStyle(
+                  fontSize: 13, fontWeight: FontWeight.w600)),
         ],
       ),
     );
   }
 }
 
-/// Utility: show the incoming call overlay as a modal bottom sheet.
-void showIncomingCallSheet(BuildContext context) {
+/// Utility: show the incoming video call overlay as a modal bottom sheet.
+void showIncomingVideoCallSheet(BuildContext context) {
   showModalBottomSheet(
     context: context,
     backgroundColor: Colors.transparent,
     isScrollControlled: true,
     isDismissible: false,
-    builder: (_) => const IncomingCallOverlay(),
+    builder: (_) => const IncomingVideoCallOverlay(),
   );
 }

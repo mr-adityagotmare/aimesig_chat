@@ -16,6 +16,7 @@ import '../group/create_group_screen.dart';
 import '../group/group_chat_screen.dart';
 import '../profile/profile_screen.dart';
 import '../settings/settings_screen.dart';
+import '../../widgets/active_call_banner.dart';
 
 class HomeScreen extends StatefulWidget {
   final UdpChatService udp;
@@ -147,6 +148,9 @@ class _HomeScreenState extends State<HomeScreen>
               ),
             ),
           ),
+
+          // ── Active call banner ──────────────────────────────────────────────
+          const ActiveCallBanner(),
 
           // ── Tabs ────────────────────────────────────────────────────────────
           Container(

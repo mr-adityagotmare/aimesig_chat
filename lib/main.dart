@@ -24,6 +24,9 @@ import 'screens/onboarding/onboarding_screen.dart';
 import 'screens/call/incoming_call_overlay.dart'; // NEW
 import 'theme/app_theme.dart';
 import 'utils/device_id.dart';
+import 'core/network/video_call_service.dart';
+import 'providers/video_call_provider.dart';
+import 'screens/call/incoming_video_call_overlay.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -50,7 +53,8 @@ class AimesigChatApp extends StatelessWidget {
         ChangeNotifierProvider(create: (_) => ChatProvider()),
         ChangeNotifierProvider(create: (_) => GroupProvider()),
         ChangeNotifierProvider(create: (_) => ThemeProvider()),
-        ChangeNotifierProvider(create: (_) => CallProvider()), // NEW
+        ChangeNotifierProvider(create: (_) => CallProvider()), 
+        ChangeNotifierProvider(create: (_) => VideoCallProvider()),
       ],
       child: Consumer<ThemeProvider>(
         builder: (context, themeProvider, _) {
@@ -76,7 +80,8 @@ class _AppRootState extends State<AppRoot> {
   LanDiscoveryService? discovery;
   UdpChatService? udp;
   FileTransferService? fileTransfer;
-  VoiceCallService? _voiceCall; // NEW
+  VoiceCallService? _voiceCall; 
+  VideoCallService? _videoCall;
   String username = '';
   String deviceId = '';
   MessageQueueService? _messageQueue;
@@ -155,6 +160,22 @@ class _AppRootState extends State<AppRoot> {
     };
     // ────────────────────────────────────────────────────────────────────
 
+        // ── Video call service ──────────────────────────────────────────────────
+    _videoCall = VideoCallService(
+      udp: udp!,
+      myDeviceId: deviceId,
+      myName: username,
+    );
+
+    final videoCallProvider = context.read<VideoCallProvider>();
+    videoCallProvider.init(_videoCall!);
+
+    _videoCall!.onIncomingCall = (session) {
+      if (mounted) {
+        showIncomingVideoCallSheet(context);
+      }
+    };
+
     // Wire up incoming file progress → ChatProvider
     ft.onReceiveProgress = (id, fileName, received, total, state, {savedPath}) {
       final progress = total > 0 ? received / total : 0.0;
@@ -213,6 +234,11 @@ class _AppRootState extends State<AppRoot> {
       // NEW: Route call-signalling packets to VoiceCallService
       if (type != null && type.startsWith('CALL_')) {
         await vc.handleSignal(ip, data);
+        return;
+      }
+        // --- NEW: video call routing ---
+      if (type != null && type.startsWith('VIDEO_CALL_')) {
+        await _videoCall?.handleSignal(ip, data);
         return;
       }
 
