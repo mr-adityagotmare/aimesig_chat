@@ -8,8 +8,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'core/database/database_helper.dart';
 import 'core/network/lan_discovery_service.dart';
 import 'core/network/udp_chat_service.dart';
+import 'core/network/internet_chat_service.dart';
 import 'core/network/file_transfer_service.dart';
-import 'core/network/voice_call_service.dart'; // NEW
+import 'core/network/voice_call_service.dart';
 import 'core/services/message_queue_service.dart';
 import 'models/chat_message.dart';
 import 'models/group.dart';
@@ -18,10 +19,11 @@ import 'providers/peer_provider.dart';
 import 'providers/chat_provider.dart';
 import 'providers/group_provider.dart';
 import 'providers/theme_provider.dart';
-import 'providers/call_provider.dart'; // NEW
+import 'providers/call_provider.dart';
+import 'providers/network_mode_provider.dart';
 import 'screens/home/home_screen.dart';
 import 'screens/onboarding/onboarding_screen.dart';
-import 'screens/call/incoming_call_overlay.dart'; // NEW
+import 'screens/call/incoming_call_overlay.dart';
 import 'theme/app_theme.dart';
 import 'utils/device_id.dart';
 import 'core/network/video_call_service.dart';
@@ -53,8 +55,9 @@ class AimesigChatApp extends StatelessWidget {
         ChangeNotifierProvider(create: (_) => ChatProvider()),
         ChangeNotifierProvider(create: (_) => GroupProvider()),
         ChangeNotifierProvider(create: (_) => ThemeProvider()),
-        ChangeNotifierProvider(create: (_) => CallProvider()), 
+        ChangeNotifierProvider(create: (_) => CallProvider()),
         ChangeNotifierProvider(create: (_) => VideoCallProvider()),
+        ChangeNotifierProvider(create: (_) => NetworkModeProvider()),
       ],
       child: Consumer<ThemeProvider>(
         builder: (context, themeProvider, _) {
@@ -77,14 +80,21 @@ class AppRoot extends StatefulWidget {
 }
 
 class _AppRootState extends State<AppRoot> {
+  // LAN services
   LanDiscoveryService? discovery;
   UdpChatService? udp;
+
+  // Internet service
+  InternetChatService? internetChat;
+
+  // Shared services
   FileTransferService? fileTransfer;
-  VoiceCallService? _voiceCall; 
+  VoiceCallService? _voiceCall;
   VideoCallService? _videoCall;
+  MessageQueueService? _messageQueue;
+
   String username = '';
   String deviceId = '';
-  MessageQueueService? _messageQueue;
   bool ready = false;
   bool isFirstTime = false;
   String? _initError;
@@ -98,6 +108,7 @@ class _AppRootState extends State<AppRoot> {
   Future<void> init() async {
     try {
       await context.read<ThemeProvider>().loadTheme();
+      await context.read<NetworkModeProvider>().load();
       final prefs = await SharedPreferences.getInstance();
       username = prefs.getString('username') ?? '';
 
@@ -127,66 +138,234 @@ class _AppRootState extends State<AppRoot> {
     final peerProvider = context.read<PeerProvider>();
     final chatProvider = context.read<ChatProvider>();
     final groupProvider = context.read<GroupProvider>();
-    final callProvider = context.read<CallProvider>(); // NEW
+    final callProvider = context.read<CallProvider>();
+    final networkMode = context.read<NetworkModeProvider>();
 
-    discovery?.stop();
-    fileTransfer?.dispose();
-    _voiceCall?.dispose(); // NEW
+    await _stopAllServices();
 
+    if (networkMode.isInternet) {
+      await _startInternetServices(
+          peerProvider, chatProvider, groupProvider, callProvider);
+    } else {
+      await _startLanServices(
+          peerProvider, chatProvider, groupProvider, callProvider);
+    }
+  }
+
+  // ── LAN ────────────────────────────────────────────────────────────────────
+
+  Future<void> _startLanServices(
+    PeerProvider peerProvider,
+    ChatProvider chatProvider,
+    GroupProvider groupProvider,
+    CallProvider callProvider,
+  ) async {
     final service = UdpChatService();
     udp = service;
     await service.start();
-
-    // Wire peerProvider into udp so broadcastToGroup can resolve IPs
     service.peerProvider = peerProvider;
 
-    final ft = FileTransferService(service);
+    _setupFileTransfer(service, peerProvider, chatProvider);
+    _setupVoiceCall(service, callProvider);
+    _setupVideoCall(service);
+
+    service.onMessage = (ip, data) async =>
+        _handleIncomingMessage(ip, data, service.sendMessage,
+            peerProvider, chatProvider, groupProvider);
+
+    discovery = LanDiscoveryService(deviceId: deviceId, username: username);
+    discovery!.onPeerFound = (peerData) {
+      peerProvider.updatePeer(Peer(
+        deviceId: peerData['deviceId'],
+        name: peerData['name'],
+        ip: peerData['ip'],
+        port: peerData['port'],
+        online: true,
+        lastSeen: DateTime.now(),
+      ));
+    };
+    await discovery!.start();
+
+    _startMessageQueue(chatProvider, peerProvider,
+        ({required String ip, required Map<String, dynamic> data}) =>
+            service.sendMessage(ip: ip, data: data));
+  }
+
+  // ── Internet ───────────────────────────────────────────────────────────────
+
+  Future<void> _startInternetServices(
+    PeerProvider peerProvider,
+    ChatProvider chatProvider,
+    GroupProvider groupProvider,
+    CallProvider callProvider,
+  ) async {
+    final service = InternetChatService();
+    service.myDeviceId = deviceId;
+    service.myName = username;
+    service.peerProvider = peerProvider;
+    internetChat = service;
+
+    sendFn({required String ip, required Map<String, dynamic> data}) =>
+        service.sendMessage(ip: ip, data: data);
+
+    // Adapters so call/file services get a UdpChatService-compatible object
+    final adapter = _InternetAdapter(service);
+    _setupFileTransfer(adapter, peerProvider, chatProvider);
+    _setupVoiceCall(adapter, callProvider);
+    _setupVideoCall(adapter);
+
+    service.onMessage = (senderDeviceId, data) async =>
+        _handleIncomingMessage(senderDeviceId, data, sendFn,
+            peerProvider, chatProvider, groupProvider);
+
+    await service.start();
+
+    service.listenForPeers((peerData) {
+      peerProvider.updatePeer(Peer(
+        deviceId: peerData['deviceId'],
+        name: peerData['name'],
+        ip: peerData['ip'], // deviceId string doubles as "ip"
+        port: peerData['port'],
+        online: peerData['online'] as bool,
+        lastSeen: DateTime.now(),
+      ));
+    });
+
+    _startMessageQueue(chatProvider, peerProvider, sendFn);
+  }
+
+  // ── Shared message dispatcher ──────────────────────────────────────────────
+
+  Future<void> _handleIncomingMessage(
+    String senderKey,
+    Map<String, dynamic> data,
+    void Function({required String ip, required Map<String, dynamic> data})
+        sendFn,
+    PeerProvider peerProvider,
+    ChatProvider chatProvider,
+    GroupProvider groupProvider,
+  ) async {
+    final type = data['type'] as String?;
+
+    if (type != null && type.startsWith('FILE_')) {
+      fileTransfer?.handleMessage(senderKey, data);
+      return;
+    }
+    if (type != null && type.startsWith('CALL_')) {
+      await _voiceCall?.handleSignal(senderKey, data);
+      return;
+    }
+    if (type != null && type.startsWith('VIDEO_CALL_')) {
+      await _videoCall?.handleSignal(senderKey, data);
+      return;
+    }
+
+    if (type == 'GROUP_INVITE') {
+      final groupId = data['groupId'] as String;
+      final groupName = data['groupName'] as String;
+      final creatorDeviceId = data['creatorDeviceId'] as String;
+      final memberDeviceIds = (data['memberDeviceIds'] as String)
+          .split(',')
+          .where((s) => s.isNotEmpty)
+          .toList();
+      final memberNames = (data['memberNames'] as String)
+          .split(',')
+          .where((s) => s.isNotEmpty)
+          .toList();
+
+      if (!memberDeviceIds.contains(deviceId)) return;
+      if (groupProvider.getGroup(groupId) != null) return;
+
+      final group = Group(
+        id: groupId,
+        name: groupName,
+        creatorDeviceId: creatorDeviceId,
+        memberDeviceIds: memberDeviceIds,
+        memberNames: memberNames,
+        createdAt:
+            DateTime.fromMillisecondsSinceEpoch(data['timestamp'] as int),
+      );
+      await groupProvider.addGroup(group);
+      return;
+    }
+
+    if (type == 'GROUP_MESSAGE') {
+      final groupId = data['groupId'] as String;
+      final sender = data['sender'] as String;
+      final msgId = data['id'] as String;
+      final message = data['message'] as String;
+      final ts = data['timestamp'] as int;
+
+      final group = groupProvider.getGroup(groupId);
+      if (group == null) return;
+
+      await groupProvider.addGroupMessage(
+        groupId,
+        ChatMessage(
+          id: msgId,
+          sender: sender,
+          receiver: groupId,
+          message: message,
+          timestamp: ts,
+          mine: false,
+          delivered: true,
+          read: groupProvider.currentOpenGroup == groupId,
+        ),
+      );
+      return;
+    }
+
+    if (type == 'MESSAGE') {
+      final sender = data['sender'] as String;
+      final message = data['message'] as String;
+      final msgId = data['id'] as String;
+
+      await chatProvider.addMessage(
+        sender,
+        ChatMessage(
+          id: msgId,
+          sender: sender,
+          receiver: username,
+          message: message,
+          timestamp: data['timestamp'],
+          mine: false,
+          delivered: true,
+          read: false,
+        ),
+      );
+
+      sendFn(ip: senderKey, data: {'type': 'DELIVERED', 'id': msgId});
+
+      if (chatProvider.currentOpenChat == sender) {
+        await chatProvider.markRead(msgId);
+        sendFn(ip: senderKey, data: {'type': 'READ', 'id': msgId});
+      }
+    } else if (type == 'DELIVERED') {
+      await chatProvider.markDelivered(data['id']);
+    } else if (type == 'READ') {
+      await chatProvider.markRead(data['id']);
+    }
+  }
+
+  // ── Service wiring helpers ─────────────────────────────────────────────────
+
+  void _setupFileTransfer(
+    UdpChatService svc,
+    PeerProvider peerProvider,
+    ChatProvider chatProvider,
+  ) {
+    final ft = FileTransferService(svc);
     fileTransfer = ft;
 
-    // ── NEW: Voice call service ──────────────────────────────────────────
-    final vc = VoiceCallService(
-      udp: service,
-      myDeviceId: deviceId,
-      myName: username,
-    );
-    _voiceCall = vc;
-    callProvider.init(vc);
-
-    // Show incoming call overlay when a call arrives
-    vc.onIncomingCall = (session) {
-      if (mounted) {
-        showIncomingCallSheet(context);
-      }
-    };
-    // ────────────────────────────────────────────────────────────────────
-
-        // ── Video call service ──────────────────────────────────────────────────
-    _videoCall = VideoCallService(
-      udp: udp!,
-      myDeviceId: deviceId,
-      myName: username,
-    );
-
-    final videoCallProvider = context.read<VideoCallProvider>();
-    videoCallProvider.init(_videoCall!);
-
-    _videoCall!.onIncomingCall = (session) {
-      if (mounted) {
-        showIncomingVideoCallSheet(context);
-      }
-    };
-
-    // Wire up incoming file progress → ChatProvider
-    ft.onReceiveProgress = (id, fileName, received, total, state, {savedPath}) {
+    ft.onReceiveProgress =
+        (id, fileName, received, total, state, {savedPath}) {
       final progress = total > 0 ? received / total : 0.0;
       switch (state) {
         case RecvState.receiving:
           chatProvider.updateTransferProgress(id, progress);
           break;
         case RecvState.complete:
-          if (savedPath != null) {
-            chatProvider.updateFilePath(id, savedPath);
-          }
+          if (savedPath != null) chatProvider.updateFilePath(id, savedPath);
           break;
         case RecvState.failed:
           chatProvider.markTransferFailed(id);
@@ -196,13 +375,10 @@ class _AppRootState extends State<AppRoot> {
       }
     };
 
-    // Ask user before accepting file (auto-accept for now)
-    ft.onIncomingOffer = (id, peerIp, fileName, fileSize) async {
-      final peer = peerProvider.peers
-          .where((p) => p.ip == peerIp)
-          .firstOrNull;
-      final senderName = peer?.name ?? peerIp;
-
+    ft.onIncomingOffer = (id, peerKey, fileName, fileSize) async {
+      final peer =
+          peerProvider.peers.where((p) => p.ip == peerKey).firstOrNull;
+      final senderName = peer?.name ?? peerKey;
       final isImg = _isImageName(fileName);
       await chatProvider.addMessage(
         senderName,
@@ -221,139 +397,58 @@ class _AppRootState extends State<AppRoot> {
       );
       return true;
     };
+  }
 
-    service.onMessage = (ip, data) async {
-      final type = data['type'] as String?;
-
-      // Route file-transfer packets to FileTransferService
-      if (type != null && type.startsWith('FILE_')) {
-        ft.handleMessage(ip, data);
-        return;
-      }
-
-      // NEW: Route call-signalling packets to VoiceCallService
-      if (type != null && type.startsWith('CALL_')) {
-        await vc.handleSignal(ip, data);
-        return;
-      }
-        // --- NEW: video call routing ---
-      if (type != null && type.startsWith('VIDEO_CALL_')) {
-        await _videoCall?.handleSignal(ip, data);
-        return;
-      }
-
-      // ── Group invite ───────────────────────────────────────────────────────
-      if (type == 'GROUP_INVITE') {
-        final groupId = data['groupId'] as String;
-        final groupName = data['groupName'] as String;
-        final creatorDeviceId = data['creatorDeviceId'] as String;
-        final memberDeviceIds = (data['memberDeviceIds'] as String)
-            .split(',')
-            .where((s) => s.isNotEmpty)
-            .toList();
-        final memberNames = (data['memberNames'] as String)
-            .split(',')
-            .where((s) => s.isNotEmpty)
-            .toList();
-
-        if (!memberDeviceIds.contains(deviceId)) return;
-        if (groupProvider.getGroup(groupId) != null) return;
-
-        final group = Group(
-          id: groupId,
-          name: groupName,
-          creatorDeviceId: creatorDeviceId,
-          memberDeviceIds: memberDeviceIds,
-          memberNames: memberNames,
-          createdAt: DateTime.fromMillisecondsSinceEpoch(
-              data['timestamp'] as int),
-        );
-        await groupProvider.addGroup(group);
-        print('GROUP INVITE RECEIVED => $groupName');
-        return;
-      }
-
-      // ── Group message ──────────────────────────────────────────────────────
-      if (type == 'GROUP_MESSAGE') {
-        final groupId = data['groupId'] as String;
-        final sender = data['sender'] as String;
-        final msgId = data['id'] as String;
-        final message = data['message'] as String;
-        final ts = data['timestamp'] as int;
-
-        final group = groupProvider.getGroup(groupId);
-        if (group == null) return;
-
-        await groupProvider.addGroupMessage(
-          groupId,
-          ChatMessage(
-            id: msgId,
-            sender: sender,
-            receiver: groupId,
-            message: message,
-            timestamp: ts,
-            mine: false,
-            delivered: true,
-            read: groupProvider.currentOpenGroup == groupId,
-          ),
-        );
-        return;
-      }
-
-      // ── 1-to-1 message ─────────────────────────────────────────────────────
-      if (type == 'MESSAGE') {
-        final sender  = data['sender'] as String;
-        final message = data['message'] as String;
-        final msgId   = data['id'] as String;
-
-        await chatProvider.addMessage(
-          sender,
-          ChatMessage(
-            id: msgId,
-            sender: sender,
-            receiver: username,
-            message: message,
-            timestamp: data['timestamp'],
-            mine: false,
-            delivered: true,
-            read: false,
-          ),
-        );
-
-        service.sendMessage(ip: ip, data: {'type': 'DELIVERED', 'id': msgId});
-
-        if (chatProvider.currentOpenChat == sender) {
-          await chatProvider.markRead(msgId);
-          service.sendMessage(ip: ip, data: {'type': 'READ', 'id': msgId});
-        }
-      } else if (type == 'DELIVERED') {
-        await chatProvider.markDelivered(data['id']);
-      } else if (type == 'READ') {
-        await chatProvider.markRead(data['id']);
-      }
+  void _setupVoiceCall(UdpChatService svc, CallProvider callProvider) {
+    final vc =
+        VoiceCallService(udp: svc, myDeviceId: deviceId, myName: username);
+    _voiceCall = vc;
+    callProvider.init(vc);
+    vc.onIncomingCall = (session) {
+      if (mounted) showIncomingCallSheet(context);
     };
+  }
 
-    discovery = LanDiscoveryService(deviceId: deviceId, username: username);
-    discovery!.onPeerFound = (peerData) {
-      peerProvider.updatePeer(Peer(
-        deviceId: peerData['deviceId'],
-        name: peerData['name'],
-        ip: peerData['ip'],
-        port: peerData['port'],
-        online: true,
-        lastSeen: DateTime.now(),
-      ));
+  void _setupVideoCall(UdpChatService svc) {
+    _videoCall =
+        VideoCallService(udp: svc, myDeviceId: deviceId, myName: username);
+    final videoCallProvider = context.read<VideoCallProvider>();
+    videoCallProvider.init(_videoCall!);
+    _videoCall!.onIncomingCall = (session) {
+      if (mounted) showIncomingVideoCallSheet(context);
     };
-    await discovery!.start();
+  }
 
+  void _startMessageQueue(
+    ChatProvider chatProvider,
+    PeerProvider peerProvider,
+    void Function({required String ip, required Map<String, dynamic> data})
+        sendFn,
+  ) {
     _messageQueue?.stop();
+    final shim = _SendShim(sendFn);
     _messageQueue = MessageQueueService(
       chatProvider: chatProvider,
       peerProvider: peerProvider,
-      udp: service,
+      udp: shim,
       myName: username,
     );
     _messageQueue!.start();
+  }
+
+  Future<void> _stopAllServices() async {
+    discovery?.stop();
+    discovery = null;
+    udp?.stop();
+    udp = null;
+    internetChat?.stop();
+    internetChat = null;
+    fileTransfer?.dispose();
+    fileTransfer = null;
+    _voiceCall?.dispose();
+    _voiceCall = null;
+    _messageQueue?.stop();
+    _messageQueue = null;
   }
 
   bool _isImageName(String name) {
@@ -364,6 +459,8 @@ class _AppRootState extends State<AppRoot> {
         lower.endsWith('.gif') ||
         lower.endsWith('.webp');
   }
+
+  // ── Public callbacks ───────────────────────────────────────────────────────
 
   Future<void> onNameSet(String name) async {
     try {
@@ -392,13 +489,25 @@ class _AppRootState extends State<AppRoot> {
     }
   }
 
+  /// Triggered by SettingsScreen when user flips the network mode toggle.
+  Future<void> onNetworkModeChanged() async {
+    setState(() => ready = false);
+    try {
+      await startServices();
+    } catch (e) {
+      print('MODE CHANGE ERROR => $e');
+    }
+    setState(() => ready = true);
+  }
+
   @override
   void dispose() {
     discovery?.stop();
     _messageQueue?.stop();
     udp?.stop();
+    internetChat?.stop();
     fileTransfer?.dispose();
-    _voiceCall?.dispose(); // NEW
+    _voiceCall?.dispose();
     super.dispose();
   }
 
@@ -488,12 +597,71 @@ class _AppRootState extends State<AppRoot> {
       return OnboardingScreen(onDone: onNameSet);
     }
 
+    // In internet mode udp is null; pass the adapter so HomeScreen / screens
+    // that accept UdpChatService still compile unchanged.
+    final effectiveUdp =
+        udp ?? _InternetAdapter(internetChat!);
+
     return HomeScreen(
-      udp: udp!,
+      udp: effectiveUdp,
       fileTransfer: fileTransfer!,
       username: username,
       deviceId: deviceId,
       onNameChanged: changeName,
+      onNetworkModeChanged: onNetworkModeChanged,
     );
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// _InternetAdapter
+// Wraps InternetChatService behind UdpChatService so VoiceCallService,
+// VideoCallService, FileTransferService, etc. compile unchanged.
+// ─────────────────────────────────────────────────────────────────────────────
+class _InternetAdapter extends UdpChatService {
+  final InternetChatService _net;
+  _InternetAdapter(this._net);
+
+  @override
+  Future<void> start() async {}
+
+  @override
+  void sendMessage(
+          {required String ip, required Map<String, dynamic> data}) =>
+      _net.sendMessage(ip: ip, data: data);
+
+  @override
+  void broadcastToGroup(
+          {required Group group, required String payload}) =>
+      _net.broadcastToGroup(group: group, payload: payload);
+
+  @override
+  void stop() {}
+
+  @override
+  set onMessage(Function(String, Map<String, dynamic>)? fn) =>
+      _net.onMessage = fn;
+
+  @override
+  set peerProvider(PeerProvider? p) => _net.peerProvider = p;
+}
+
+// Minimal shim used only by MessageQueueService (needs udp.sendMessage).
+class _SendShim extends UdpChatService {
+  final void Function(
+      {required String ip,
+      required Map<String, dynamic> data}) _fn;
+
+  _SendShim(this._fn);
+
+  @override
+  Future<void> start() async {}
+
+  @override
+  void sendMessage(
+          {required String ip, required Map<String, dynamic> data}) =>
+      _fn(ip: ip, data: data);
+
+  @override
+  void stop() {}
 }

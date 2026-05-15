@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "511798348683",
+    "project_id": "aimapp-5cfbf",
+    "storage_bucket": "aimapp-5cfbf.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:511798348683:android:83620a4b460ed796b53d8e",
+        "android_client_info": {
+          "package_name": "com.aimesig.aimapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAMqH5VCWRvzLw1SXo0ZV_LULAhGQ_6Oos"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

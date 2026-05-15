@@ -2,14 +2,17 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../providers/theme_provider.dart';
+import '../../providers/network_mode_provider.dart';
 import '../../theme/app_theme.dart';
 
 class SettingsScreen extends StatelessWidget {
-  const SettingsScreen({super.key});
+  final Future<void> Function()? onNetworkModeChanged;
+  const SettingsScreen({super.key, this.onNetworkModeChanged});
 
   @override
   Widget build(BuildContext context) {
     final themeProvider = context.watch<ThemeProvider>();
+    final networkMode = context.watch<NetworkModeProvider>();
     final isDark = themeProvider.isDark;
     final accent = themeProvider.primaryColor;
 
@@ -229,6 +232,96 @@ class SettingsScreen extends StatelessWidget {
 
           const SizedBox(height: 20),
 
+          // Connection Mode section
+          _SectionLabel(label: 'CONNECTION MODE', isDark: isDark),
+          const SizedBox(height: 8),
+
+          _SettingsCard(
+            isDark: isDark,
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Choose how Aimesig connects to other users',
+                      style: TextStyle(
+                        color: AppColors.textSecondary(isDark),
+                        fontSize: 13,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _ModeCard(
+                            icon: Icons.wifi_rounded,
+                            title: 'LAN / Wi-Fi',
+                            subtitle: 'Same network only\nNo internet needed',
+                            selected: networkMode.isLan,
+                            accent: accent,
+                            isDark: isDark,
+                            onTap: () async {
+                              await networkMode.setMode(NetworkMode.lan);
+                              await onNetworkModeChanged?.call();
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: _ModeCard(
+                            icon: Icons.public_rounded,
+                            title: 'Internet',
+                            subtitle: 'Chat with anyone\nAnywhere online',
+                            selected: networkMode.isInternet,
+                            accent: accent,
+                            isDark: isDark,
+                            onTap: () async {
+                              await networkMode.setMode(NetworkMode.internet);
+                              await onNetworkModeChanged?.call();
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (networkMode.isInternet) ...[
+                      const SizedBox(height: 12),
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: accent.withOpacity(0.08),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                              color: accent.withOpacity(0.2), width: 1),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(Icons.info_outline_rounded,
+                                color: accent, size: 16),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                'Internet mode relays messages via the Aimesig server. '
+                                'You can chat with users on different networks.',
+                                style: TextStyle(
+                                  color: AppColors.textSecondary(isDark),
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 20),
+
           // Network info
           _SectionLabel(label: 'NETWORK', isDark: isDark),
           const SizedBox(height: 8),
@@ -236,29 +329,55 @@ class SettingsScreen extends StatelessWidget {
           _SettingsCard(
             isDark: isDark,
             children: [
-              _InfoTile(
-                icon: Icons.router_outlined,
-                label: 'Discovery Port',
-                value: '8888',
-                isDark: isDark,
-                accent: accent,
-              ),
-              _Divider(isDark: isDark),
-              _InfoTile(
-                icon: Icons.message_outlined,
-                label: 'Message Port',
-                value: '4040',
-                isDark: isDark,
-                accent: accent,
-              ),
-              _Divider(isDark: isDark),
-              _InfoTile(
-                icon: Icons.broadcast_on_personal_outlined,
-                label: 'Protocol',
-                value: 'UDP Broadcast',
-                isDark: isDark,
-                accent: accent,
-              ),
+              if (networkMode.isLan) ...[
+                _InfoTile(
+                  icon: Icons.router_outlined,
+                  label: 'Discovery Port',
+                  value: '8888',
+                  isDark: isDark,
+                  accent: accent,
+                ),
+                _Divider(isDark: isDark),
+                _InfoTile(
+                  icon: Icons.message_outlined,
+                  label: 'Message Port',
+                  value: '4040',
+                  isDark: isDark,
+                  accent: accent,
+                ),
+                _Divider(isDark: isDark),
+                _InfoTile(
+                  icon: Icons.broadcast_on_personal_outlined,
+                  label: 'Protocol',
+                  value: 'UDP Broadcast',
+                  isDark: isDark,
+                  accent: accent,
+                ),
+              ] else ...[
+                _InfoTile(
+                  icon: Icons.cloud_outlined,
+                  label: 'Server',
+                  value: 'aimapp-server.onrender.com',
+                  isDark: isDark,
+                  accent: accent,
+                ),
+                _Divider(isDark: isDark),
+                _InfoTile(
+                  icon: Icons.swap_horiz_rounded,
+                  label: 'Protocol',
+                  value: 'WebSocket (Socket.IO)',
+                  isDark: isDark,
+                  accent: accent,
+                ),
+                _Divider(isDark: isDark),
+                _InfoTile(
+                  icon: Icons.lock_outline_rounded,
+                  label: 'Privacy',
+                  value: 'Relay · Encrypted in transit',
+                  isDark: isDark,
+                  accent: accent,
+                ),
+              ],
             ],
           ),
 
@@ -282,7 +401,7 @@ class SettingsScreen extends StatelessWidget {
               _InfoTile(
                 icon: Icons.lock_outline_rounded,
                 label: 'Privacy',
-                value: 'LAN only · No cloud',
+                value: networkMode.isLan ? 'LAN only · No cloud' : 'Internet · Relay server',
                 isDark: isDark,
                 accent: accent,
               ),
@@ -498,6 +617,78 @@ class _InfoTile extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _ModeCard extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final bool selected;
+  final Color accent;
+  final bool isDark;
+  final VoidCallback onTap;
+
+  const _ModeCard({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.selected,
+    required this.accent,
+    required this.isDark,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: selected
+              ? accent.withOpacity(0.12)
+              : (isDark ? AppColors.darkElevated : AppColors.lightCard),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: selected ? accent : (isDark ? AppColors.darkBorder : AppColors.lightBorder),
+            width: selected ? 2 : 1,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(icon, color: selected ? accent : AppColors.textSecondary(isDark), size: 20),
+                const Spacer(),
+                if (selected)
+                  Icon(Icons.check_circle_rounded, color: accent, size: 18),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text(
+              title,
+              style: TextStyle(
+                color: selected ? accent : AppColors.textPrimary(isDark),
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              subtitle,
+              style: TextStyle(
+                color: AppColors.textMuted(isDark),
+                fontSize: 11,
+                height: 1.4,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -24,14 +24,16 @@ class HomeScreen extends StatefulWidget {
   final String username;
   final String deviceId; // NEW
   final Function(String) onNameChanged;
+  final Future<void> Function()? onNetworkModeChanged;
 
   const HomeScreen({
     super.key,
     required this.udp,
     required this.fileTransfer,
     required this.username,
-    required this.deviceId, // NEW
+    required this.deviceId,
     required this.onNameChanged,
+    this.onNetworkModeChanged,
   });
 
   @override
@@ -109,7 +111,10 @@ class _HomeScreenState extends State<HomeScreen>
                       onTap: () => Navigator.push(
                         context,
                         MaterialPageRoute(
-                            builder: (_) => const SettingsScreen()),
+                            builder: (_) => SettingsScreen(
+                                  onNetworkModeChanged:
+                                      widget.onNetworkModeChanged,
+                                )),
                       ),
                     ),
                     const SizedBox(width: 6),
