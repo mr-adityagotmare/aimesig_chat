@@ -523,7 +523,7 @@ class VoiceCallService {
     _session = null;
     _notify();
   }
-
+ 
   void _notify() {
     _stateController.add(_session);
   }
