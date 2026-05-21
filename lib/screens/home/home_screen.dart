@@ -9,6 +9,7 @@ import '../../providers/theme_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../providers/group_provider.dart';
 import '../../providers/peer_provider.dart';
+import '../../providers/auth_provider.dart' as ap;
 import '../../theme/app_theme.dart';
 import '../chat/chat_screen.dart';
 import '../devices/nearby_devices_screen.dart';
@@ -16,15 +17,17 @@ import '../group/create_group_screen.dart';
 import '../group/group_chat_screen.dart';
 import '../profile/profile_screen.dart';
 import '../settings/settings_screen.dart';
+import '../search/user_search_screen.dart';
 import '../../widgets/active_call_banner.dart';
 
 class HomeScreen extends StatefulWidget {
   final UdpChatService udp;
   final FileTransferService fileTransfer;
   final String username;
-  final String deviceId; // NEW
+  final String deviceId;
   final Function(String) onNameChanged;
   final Future<void> Function()? onNetworkModeChanged;
+  final Future<void> Function()? onSignOut;
 
   const HomeScreen({
     super.key,
@@ -34,6 +37,7 @@ class HomeScreen extends StatefulWidget {
     required this.deviceId,
     required this.onNameChanged,
     this.onNetworkModeChanged,
+    this.onSignOut,
   });
 
   @override
@@ -105,6 +109,34 @@ class _HomeScreenState extends State<HomeScreen>
                     const Spacer(),
                     _NetworkBadge(isDark: isDark, accent: accent),
                     const SizedBox(width: 8),
+                    // User search button
+                    _IconBtn(
+                      icon: Icons.person_search_rounded,
+                      isDark: isDark,
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => UserSearchScreen(
+                            onStartChat: (peer) {
+                              final chatProvider = context.read<ChatProvider>();
+                              chatProvider.openChat(peer.name);
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => ChatScreen(
+                                    peer: peer,
+                                    udp: widget.udp,
+                                    fileTransfer: widget.fileTransfer,
+                                    myName: widget.username,
+                                  ),
+                                ),
+                              ).then((_) => chatProvider.closeChat());
+                            },
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
                     _IconBtn(
                       icon: Icons.settings_outlined,
                       isDark: isDark,
@@ -116,6 +148,44 @@ class _HomeScreenState extends State<HomeScreen>
                                       widget.onNetworkModeChanged,
                                 )),
                       ),
+                    ),
+                    const SizedBox(width: 6),
+                    // Sign out button
+                    _IconBtn(
+                      icon: Icons.logout_rounded,
+                      isDark: isDark,
+                      onTap: () async {
+                        final confirm = await showDialog<bool>(
+                          context: context,
+                          builder: (ctx) => AlertDialog(
+                            backgroundColor:
+                                isDark ? AppColors.darkCard : Colors.white,
+                            title: Text('Sign Out',
+                                style: TextStyle(
+                                    color: AppColors.textPrimary(isDark))),
+                            content: Text(
+                                'Are you sure you want to sign out?',
+                                style: TextStyle(
+                                    color: AppColors.textSecondary(isDark))),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.pop(ctx, false),
+                                child: Text('Cancel',
+                                    style: TextStyle(
+                                        color: AppColors.textSecondary(isDark))),
+                              ),
+                              TextButton(
+                                onPressed: () => Navigator.pop(ctx, true),
+                                child: const Text('Sign Out',
+                                    style: TextStyle(color: Colors.red)),
+                              ),
+                            ],
+                          ),
+                        );
+                        if (confirm == true) {
+                          widget.onSignOut?.call();
+                        }
+                      },
                     ),
                     const SizedBox(width: 6),
                     GestureDetector(
@@ -259,62 +329,62 @@ class _ChatsTabWrapper extends StatelessWidget {
         return bLast.compareTo(aLast);
       });
 
+    void openSearchAndChat() {
+      Navigator.push(context, MaterialPageRoute(builder: (_) => UserSearchScreen(onStartChat: (peer) {
+        chatProvider.openChat(peer.name);
+        Navigator.push(context, MaterialPageRoute(builder: (_) => ChatScreen(peer: peer, udp: udp, fileTransfer: fileTransfer, myName: myName))).then((_) => chatProvider.closeChat());
+      })));
+    }
+
+    Widget listWidget;
     if (conversations.isEmpty) {
-      return Center(
+      listWidget = Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Container(
-              width: 72,
-              height: 72,
-              decoration: BoxDecoration(
-                color: accent.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(22),
-              ),
-              child: Icon(Icons.chat_bubble_outline_rounded,
-                  color: accent, size: 34),
-            ),
+            Container(width: 72, height: 72, decoration: BoxDecoration(color: accent.withOpacity(0.1), borderRadius: BorderRadius.circular(22)), child: Icon(Icons.chat_bubble_outline_rounded, color: accent, size: 34)),
             const SizedBox(height: 16),
-            Text(
-              'No conversations yet',
-              style: TextStyle(
-                color: AppColors.textPrimary(isDark),
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
+            Text('No conversations yet', style: TextStyle(color: AppColors.textPrimary(isDark), fontSize: 16, fontWeight: FontWeight.w600)),
             const SizedBox(height: 6),
-            Text(
-              'Go to Devices and tap a peer to start chatting',
-              style: TextStyle(
-                color: AppColors.textSecondary(isDark),
-                fontSize: 13,
+            Text('Search for someone or go to Devices', style: TextStyle(color: AppColors.textSecondary(isDark), fontSize: 13)),
+            const SizedBox(height: 20),
+            GestureDetector(
+              onTap: openSearchAndChat,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                decoration: BoxDecoration(color: accent.withOpacity(0.12), borderRadius: BorderRadius.circular(12), border: Border.all(color: accent.withOpacity(0.3), width: 1)),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.person_search_rounded, color: accent, size: 18),
+                  const SizedBox(width: 8),
+                  Text('Find People', style: TextStyle(color: accent, fontWeight: FontWeight.w700)),
+                ]),
               ),
             ),
           ],
         ),
       );
-    }
-
-    return ListView.separated(
-      padding: const EdgeInsets.all(16),
-      itemCount: conversations.length,
-      separatorBuilder: (_, __) => const SizedBox(height: 4),
-      itemBuilder: (context, index) {
+    } else {
+      listWidget = ListView.separated(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 80),
+        itemCount: conversations.length,
+        separatorBuilder: (_, __) => const SizedBox(height: 4),
+        itemBuilder: (context, index) {
         final entry = conversations[index];
         final peerName = entry.key;
         final msgs = entry.value;
         final lastMsg = msgs.isNotEmpty ? msgs.last : null;
         final unread = chatProvider.unreadCount(peerName);
         final peer =
-            peerProvider.peers.where((p) => p.name == peerName).firstOrNull;
+            peerProvider.peers
+            .where((p) => p.name == peerName || p.deviceId == peerName)
+            .firstOrNull;
         final online = peer?.online ?? false;
 
         final target = peer ??
             Peer(
               deviceId: peerName,
               name: peerName,
-              ip: '',
+              ip: peerName, // in internet mode, ip == deviceId
               port: 0,
               online: false,
               lastSeen: DateTime.now(),
@@ -346,6 +416,28 @@ class _ChatsTabWrapper extends StatelessWidget {
         );
       },
     );
+    }
+
+    return Stack(children: [
+      listWidget,
+      Positioned(
+        bottom: 20,
+        right: 20,
+        child: GestureDetector(
+          onTap: openSearchAndChat,
+          child: Container(
+            width: 56,
+            height: 56,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(colors: [accent, accent.withOpacity(0.7)], begin: Alignment.topLeft, end: Alignment.bottomRight),
+              shape: BoxShape.circle,
+              boxShadow: [BoxShadow(color: accent.withOpacity(0.4), blurRadius: 12, offset: const Offset(0, 4))],
+            ),
+            child: const Icon(Icons.person_search_rounded, color: Colors.white, size: 26),
+          ),
+        ),
+      ),
+    ]);
   }
 }
 

@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'core/database/database_helper.dart';
 import 'core/network/lan_discovery_service.dart';
@@ -113,69 +114,26 @@ class _AppRootState extends State<AppRoot> {
       await context.read<ThemeProvider>().loadTheme();
       await context.read<NetworkModeProvider>().load();
 
+      // ── Session restore: trust SharedPreferences only ─────────────────────
+      // 'isLoggedIn' is set to true on login and false on logout — no Firebase
+      // call needed. This survives background kills, crashes, and reboots.
       final prefs = await SharedPreferences.getInstance();
+      final isLoggedIn  = prefs.getBool('isLoggedIn') ?? false;
       final savedUsername = prefs.getString('username') ?? '';
 
-      // ── Internet mode: restore Firebase session ──────────────────────────
-      // Try to get a persisted Firebase user (works even offline if token
-      // is cached).  We give it 5 s; on timeout we fall back to LAN-only.
-      User? firebaseUser;
-      try {
-        firebaseUser = await FirebaseAuth.instance
-            .authStateChanges()
-            .first
-            .timeout(const Duration(seconds: 5), onTimeout: () => null);
-      } catch (_) {
-        firebaseUser = null;
-      }
-
-      if (firebaseUser != null) {
-        final authProvider = context.read<ap.AuthProvider>();
-
-        // Try to reload username from Firestore; on failure fall back to
-        // the value we already have in SharedPreferences.
-        try {
-          await authProvider.reloadUsername(firebaseUser.uid);
-        } catch (_) {}
-
-        final uname = (authProvider.username?.isNotEmpty == true)
-            ? authProvider.username!
-            : savedUsername;
-
-        if (uname.isNotEmpty) {
-          username = uname;
-          // Keep prefs in sync
-          await prefs.setString('username', username);
-          deviceId = await DeviceId.generate(username);
-          await context.read<ChatProvider>().loadMessages();
-          await context.read<GroupProvider>().loadGroups();
-          await startServices();
-          setState(() => ready = true);
-          return;
-        }
-      }
-
-      // ── LAN-only mode: no Firebase session needed ─────────────────────────
-      // If the user previously logged in on LAN (username saved in prefs),
-      // restore that session immediately without requiring Firebase.
-      if (savedUsername.isNotEmpty) {
+      if (isLoggedIn && savedUsername.isNotEmpty) {
         username = savedUsername;
         deviceId = await DeviceId.generate(username);
         await context.read<ChatProvider>().loadMessages();
         await context.read<GroupProvider>().loadGroups();
         await startServices();
-        setState(() => ready = true);
-        return;
       }
 
-      // No saved session — show auth screen
       setState(() => ready = true);
     } catch (e, stack) {
-      print('INIT ERROR => $e\n$stack');
-      setState(() {
-        _initError = e.toString();
-        ready = true;
-      });
+      print('[INIT] ERROR => $e
+$stack');
+      setState(() { _initError = e.toString(); ready = true; });
     }
   }
 
@@ -225,14 +183,17 @@ class _AppRootState extends State<AppRoot> {
     _setupVideoCall(adapter);
     service.onMessage = (senderDeviceId, data) async => _handleIncomingMessage(senderDeviceId, data, sendFn, peerProvider, chatProvider, groupProvider);
 
+    // Register peer-found callback BEFORE start() so it is in place when
+    // the socket connects and fires peer_online / online_peers events.
     service.listenForPeers((peerData) {
       final isOnline = peerData['online'] as bool;
       final pId = peerData['deviceId'] as String;
       if (isOnline) {
+        // updatePeer upserts the peer and marks them online with a fresh lastSeen.
         peerProvider.updatePeer(Peer(
           deviceId: pId,
           name: peerData['name'] as String,
-          ip: pId,
+          ip: pId,          // ip == deviceId in internet mode
           port: 0,
           online: true,
           lastSeen: DateTime.now(),
@@ -344,6 +305,7 @@ class _AppRootState extends State<AppRoot> {
       deviceId = await DeviceId.generate(username);
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('username', username);
+      await prefs.setBool('isLoggedIn', true);   // ← persist session flag
       await context.read<ChatProvider>().loadMessages();
       await context.read<GroupProvider>().loadGroups();
       await startServices();
@@ -357,8 +319,6 @@ class _AppRootState extends State<AppRoot> {
     try {
       deviceId = await DeviceId.generate(newName);
       username = newName;
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('username', username);
       await startServices();
       setState(() {});
     } catch (e) {
@@ -377,6 +337,7 @@ class _AppRootState extends State<AppRoot> {
     username = '';
     deviceId = '';
     final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('isLoggedIn', false);    // ← clear session flag
     await prefs.remove('username');
     await context.read<ap.AuthProvider>().signOut();
     setState(() {});

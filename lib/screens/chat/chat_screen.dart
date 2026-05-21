@@ -10,6 +10,7 @@ import '../../core/network/file_transfer_service.dart';
 import '../../core/network/udp_chat_service.dart';
 import '../../models/chat_message.dart';
 import '../../models/peer.dart';
+import '../../providers/peer_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../providers/theme_provider.dart';
 import '../../theme/app_theme.dart';
@@ -42,6 +43,20 @@ class _ChatScreenState extends State<ChatScreen> {
   final ScrollController _scrollController = ScrollController();
   bool _showSendButton = false;
 
+  /// FIX: Read live online status from PeerProvider so the UI reacts when a
+  /// peer connects/disconnects while the chat screen is open.
+  bool get _isPeerOnline {
+    try {
+      final peerProvider = context.read<PeerProvider>();
+      final livePeer = peerProvider.peers
+          .where((p) => p.deviceId == widget.peer.deviceId)
+          .firstOrNull;
+      return livePeer?.online ?? widget.peer.online;
+    } catch (_) {
+      return widget.peer.online;
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -55,7 +70,7 @@ class _ChatScreenState extends State<ChatScreen> {
       for (final msg in msgs) {
         if (!msg.mine) {
           widget.udp.sendMessage(
-              ip: widget.peer.ip, data: {'type': 'READ', 'id': msg.id});
+              ip: widget.peer.ip.isNotEmpty ? widget.peer.ip : widget.peer.deviceId, data: {'type': 'READ', 'id': msg.id});
         }
       }
       _scrollToBottom();
@@ -108,7 +123,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
 
     await provider.addMessage(widget.peer.name, msg);
-    widget.udp.sendMessage(ip: widget.peer.ip, data: {
+    widget.udp.sendMessage(ip: widget.peer.ip.isNotEmpty ? widget.peer.ip : widget.peer.deviceId, data: {
       'type': 'MESSAGE',
       'id': msgId,
       'sender': widget.myName,
@@ -122,7 +137,7 @@ class _ChatScreenState extends State<ChatScreen> {
   // ── Send file ────────────────────────────────────────────────────────────────
 
   Future<void> _pickAndSendFile() async {
-    if (!widget.peer.online) {
+    if (!_isPeerOnline) {
       _showSnack('Peer is offline');
       return;
     }
@@ -162,7 +177,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
     // Wire up send progress
     widget.fileTransfer.sendFile(
-      peerIp: widget.peer.ip,
+      peerIp: widget.peer.ip.isNotEmpty ? widget.peer.ip : widget.peer.deviceId,
       filePath: filePath,
       onProgress: (id, sent, total, state) {
         final progress = total > 0 ? sent / total : 0.0;
@@ -181,7 +196,7 @@ class _ChatScreenState extends State<ChatScreen> {
   // ── Retry failed send ────────────────────────────────────────────────────────
 
   void _retryFileSend(ChatMessage msg) {
-    if (!widget.peer.online) {
+    if (!_isPeerOnline) {
       _showSnack('Peer is offline — cannot retry yet');
       return;
     }
@@ -196,7 +211,7 @@ class _ChatScreenState extends State<ChatScreen> {
     provider.resetTransferFailed(msg.id);
 
     widget.fileTransfer.sendFile(
-      peerIp: widget.peer.ip,
+      peerIp: widget.peer.ip.isNotEmpty ? widget.peer.ip : widget.peer.deviceId,
       filePath: msg.filePath!,
       onProgress: (id, sent, total, state) {
         final progress = total > 0 ? sent / total : 0.0;
@@ -271,6 +286,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final fontSize = themeProvider.chatFontSize;
     final showTimestamps = themeProvider.showTimestamps;
 
+    context.watch<PeerProvider>(); // rebuild when peer online status changes
     final msgs = context.watch<ChatProvider>().getMessages(widget.peer.name);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -373,7 +389,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 ),
               ),
-              if (widget.peer.online)
+              if (_isPeerOnline)
                 Positioned(
                   bottom: -1,
                   right: -1,
@@ -403,11 +419,11 @@ class _ChatScreenState extends State<ChatScreen> {
                       fontWeight: FontWeight.w700,
                       letterSpacing: -0.3)),
               Text(
-                widget.peer.online
-                    ? 'online · ${widget.peer.ip}'
+                _isPeerOnline
+                    ? 'online'
                     : 'offline',
                 style: TextStyle(
-                  color: widget.peer.online
+                  color: _isPeerOnline
                       ? AppColors.accentGreen
                       : AppColors.textMuted(isDark),
                   fontSize: 11,
@@ -420,7 +436,7 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
       actions: [
         // NEW: Voice call button
-        if (widget.peer.online)
+        if (_isPeerOnline)
           IconButton(
             icon: Icon(Icons.call_rounded,
                 color: AppColors.textSecondary(isDark), size: 22),
@@ -429,7 +445,7 @@ class _ChatScreenState extends State<ChatScreen> {
               final cp = context.read<CallProvider>();
               if (cp.hasActiveCall) return; // already in a call
               await cp.startIndividualCall(
-                peerIp: widget.peer.ip,
+                peerIp: widget.peer.ip.isNotEmpty ? widget.peer.ip : widget.peer.deviceId,
                 peerName: widget.peer.name,
                 peerDeviceId: widget.peer.deviceId,
               );
@@ -441,7 +457,7 @@ class _ChatScreenState extends State<ChatScreen> {
             },
           ),
           // Video call button — add BEFORE the existing voice call button
-        if (widget.peer.online)
+        if (_isPeerOnline)
           IconButton(
             icon: Icon(Icons.videocam_rounded,
                 color: AppColors.textSecondary(isDark), size: 24),
@@ -451,7 +467,7 @@ class _ChatScreenState extends State<ChatScreen> {
               if (vcp.hasActiveCall) return;
               await vcp.service?.initRenderers();
               await vcp.startIndividualCall(
-                peerIp: widget.peer.ip,
+                peerIp: widget.peer.ip.isNotEmpty ? widget.peer.ip : widget.peer.deviceId,
                 peerName: widget.peer.name,
                 peerDeviceId: widget.peer.deviceId,
               );
@@ -599,7 +615,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                   child: Icon(Icons.attach_file_rounded,
                       size: 20,
-                      color: widget.peer.online
+                      color: _isPeerOnline
                           ? accent
                           : AppColors.textMuted(isDark)),
                 ),

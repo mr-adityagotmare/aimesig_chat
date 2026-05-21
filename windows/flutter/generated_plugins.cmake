@@ -3,7 +3,10 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  cloud_firestore
   connectivity_plus
+  firebase_auth
+  firebase_core
   flutter_webrtc
   permission_handler_windows
 )
